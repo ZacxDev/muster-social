@@ -110,3 +110,21 @@ test("the lock admits one process; a dead holder's lock is taken over", () => {
     t.done();
   }
 });
+
+test("a read-only open (status, beside the daemon) never truncates a torn tail and cannot append", () => {
+  const t = tmp();
+  try {
+    const p = join(t.dir, "j.jsonl");
+    const a = new Journal(p);
+    a.append({ t: "claimed", draft_id: 1, venue: "x", target_kind: "post", target_ref: "", body_sha256: "h", at: 1 });
+    appendFileSync(p, '{"t":"open","draft_id":1,"ven');
+    const before = readFileSync(p, "utf8");
+    const ro = new Journal(p, { readOnly: true });
+    assert.equal(phaseOf(ro.get(1) as never), "claimed");
+    assert.equal(readFileSync(p, "utf8"), before, "the file is byte-for-byte unchanged");
+    assert.throws(() => ro.append({ t: "refused", draft_id: 1, code: "x", detail: "d", at: 2 }), /read-only/u);
+    assert.equal(readFileSync(p, "utf8"), before);
+  } finally {
+    t.done();
+  }
+});

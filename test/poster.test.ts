@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { Journal, phaseOf } from "../src/journal.ts";
 import { MusterClient, type Claim } from "../src/muster/client.ts";
-import { Poster, guardDriver, UngatedSubmit, type DriverSession } from "../src/poster.ts";
+import { Poster, type DriverSession } from "../src/poster.ts";
 import { makeXAdapter } from "../src/sites/x.ts";
 import { sha256Hex } from "../src/media.ts";
 import { X_SELECTORS } from "../src/sites/selectors.ts";
@@ -40,7 +40,7 @@ interface World {
   logs: string[];
 }
 
-function world(o: { site?: Partial<Omit<FakeXOptions, "clock">>; x?: Partial<SiteConfig>; journal?: Journal; fakeX?: FakeX; crash?: Error; adapter?: SiteAdapter } = {}): World {
+function world(o: { site?: Partial<Omit<FakeXOptions, "clock">>; x?: Partial<SiteConfig>; journal?: Journal; fakeX?: FakeX; crash?: Error; adapter?: SiteAdapter; maxPacingWaitMs?: number } = {}): World {
   const clock = { t: Date.UTC(2026, 0, 2) };
   const fx = o.fakeX ?? new FakeX({ account: ME, ...o.site, clock: () => clock.t });
   const drivers: FakeDriver[] = [];
@@ -71,6 +71,7 @@ function world(o: { site?: Partial<Omit<FakeXOptions, "clock">>; x?: Partial<Sit
       clock.t += ms;
     },
     log: (s) => logs.push(s),
+    ...(o.maxPacingWaitMs ? { maxPacingWaitMs: o.maxPacingWaitMs } : {}),
   });
   return { poster, journal, site: fx, drivers, clock, logs };
 }
@@ -285,16 +286,6 @@ test("pacing: a second post inside the gap waits in-process; past the in-lease w
   assert.equal(slow.poster.readyToClaim().ready, false);
 });
 
-test("guardDriver refuses a plain click on a submit control (only the gate may click)", async () => {
-  const fx = new FakeX({ account: ME, clock: () => 0 });
-  const d = new FakeDriver(fx, [X_SELECTORS.submit]);
-  const g = guardDriver(d, [X_SELECTORS.submit]);
-  await assert.rejects(g.click(X_SELECTORS.submit), UngatedSubmit);
-  assert.equal(d.submits, 0);
-  await g.click("button.something-else");
-  assert.equal(d.clicks.length, 1);
-});
-
 // A misbehaving adapter, to prove the gate and the guarded driver hold even
 // when site code is wrong.
 function rogueWorld(post: (ctx: PostContext) => Promise<PostOutcome>): World {
@@ -303,6 +294,7 @@ function rogueWorld(post: (ctx: PostContext) => Promise<PostOutcome>): World {
 
 test("the gate opens once: an adapter calling submit twice gets one click, and the outcome is unknown", async () => {
   const w = rogueWorld(async (ctx) => {
+    await ctx.driver.goto("https://x.com/home");
     await ctx.submit(X_SELECTORS.submit);
     await ctx.submit(X_SELECTORS.submit);
     return { phase: "clicked", state: "posted", ref: "https://x.com/example_me/status/1", detail: "" };
@@ -316,12 +308,13 @@ test("the gate opens once: an adapter calling submit twice gets one click, and t
 
 test("an adapter clicking submit directly (not through the gate) is stopped: no click, not sent", async () => {
   const w = rogueWorld(async (ctx) => {
+    await ctx.driver.goto("https://x.com/home");
     await ctx.driver.click(X_SELECTORS.submit);
     return { phase: "clicked", state: "posted", ref: "u", detail: "" };
   });
   const out = await w.poster.handle(claim(31, "sneaky"));
   assert.equal(submits(w), 0);
-  assert.equal(out.action === "refused" && out.code, "error");
+  assert.equal(out.action === "refused" && out.code, "forbidden_target");
   assert.equal(w.journal.everOpened(31), false);
 });
 
@@ -334,6 +327,7 @@ test("an adapter claiming 'clicked' without using the gate is treated as not sen
 
 test("an adapter that throws after the click is unknown, never refused", async () => {
   const w = rogueWorld(async (ctx) => {
+    await ctx.driver.goto("https://x.com/home");
     await ctx.submit(X_SELECTORS.submit);
     throw new Error("page crashed during read-back");
   });
@@ -344,11 +338,40 @@ test("an adapter that throws after the click is unknown, never refused", async (
 
 test("the gate refuses a selector that is not one of the site's submit controls", async () => {
   const w = rogueWorld(async (ctx) => {
-    await ctx.submit("button.not-a-submit");
+    await ctx.driver.goto("https://x.com/home");
+    await ctx.submit(X_SELECTORS.composer); // an element that exists, but is not a submit control
     return { phase: "clicked", state: "posted", ref: "u", detail: "" };
   });
   const out = await w.poster.handle(claim(34, "wrong button"));
-  assert.equal(out.action === "refused" && out.code, "error");
+  assert.equal(out.action === "refused" && out.code, "forbidden_target");
+  assert.match(out.action === "refused" ? out.detail : "", /not one of the site's submit controls/u);
   assert.equal(w.journal.everOpened(34), false);
   assert.equal(w.drivers[0]?.clicks.length, 0);
+});
+
+test("lease: a click that would land with under 30 s of muster's 2-minute lease left is refused, nothing armed", async () => {
+  const w = world({ x: { min_gap_seconds: 95 }, maxPacingWaitMs: 100_000 });
+  assert.equal((await w.poster.handle(claim(50, "first"))).action, "posted");
+  const out = await w.poster.handle(claim(51, "second")); // waits ~95 s for pacing, then reaches the gate
+  assert.equal(out.action === "refused" && out.code, "lease");
+  assert.equal(w.journal.everOpened(51), false);
+  assert.equal(submits(w), 1);
+  assert.equal(m.results.get(51)?.ok, false);
+});
+
+test("an adapter typing into, or attaching via, the Post button is refused before any action; the journal is not armed", async () => {
+  for (const act of ["insertText", "attachFiles"] as const) {
+    const w = rogueWorld(async (ctx) => {
+      await ctx.driver.goto("https://x.com/home");
+      if (act === "insertText") await ctx.driver.insertText("button[data-testid=tweetButtonInline]", "x");
+      else await ctx.driver.attachFiles("main button", ["/x.png"], { viaChooser: true });
+      return { phase: "clicked", state: "posted", ref: "u", detail: "" };
+    });
+    const id = act === "insertText" ? 52 : 53;
+    const out = await w.poster.handle(claim(id, "sneaky " + act));
+    assert.equal(out.action === "refused" && out.code, "forbidden_target", act);
+    assert.equal(submits(w), 0, act);
+    assert.equal(w.journal.everOpened(id), false, act);
+    assert.deepEqual(w.drivers[0]?.actions, [], act);
+  }
 });

@@ -3,8 +3,8 @@
 
 import { all, parse, plainText, segments, type Doc, type El } from "./dom.ts";
 import { DEFAULT_TIMING, idTimeMs, poll, readback, type Timing } from "./common.ts";
-import { X_SELECTORS as S } from "./selectors.ts";
-import { findMentions, normalizeWs, textMatches, type Segment } from "../text.ts";
+import { X_SELECTORS as S, X_SUBMIT_LABELS } from "./selectors.ts";
+import { findMentions, normalizeLines, normalizeWs, textMatches, type Segment } from "../text.ts";
 import {
   refused, type BrowserDriver, type OutboundTarget, type PostContext, type PostOutcome,
   type SessionState, type SiteAdapter, type SiteLimits,
@@ -119,13 +119,25 @@ export function parseXTarget(t: OutboundTarget): { ok: true; kind: "post" | "rep
 export function makeXAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
   const T = timing;
 
-  async function readArticles(d: BrowserDriver, url: string): Promise<XArticle[]> {
+  /** The articles on a timeline page, or null when the page did not show it
+   * loaded: an empty list counts only beside X's empty-state marker. */
+  async function readArticles(d: BrowserDriver, url: string): Promise<XArticle[] | null> {
     await d.goto(url);
-    const arts = await poll(d, T.loadMs, T.stepMs, async () => {
-      const a = xArticles(parse(await d.html()));
-      return a.length ? a : null;
+    const got = await poll(d, T.loadMs, T.stepMs, async () => {
+      const doc = parse(await d.html());
+      const a = xArticles(doc);
+      if (a.length) return { a };
+      return doc.querySelector(S.emptyState) ? { a: [] as XArticle[] } : null;
     });
-    return arts ?? [];
+    return got ? got.a : null;
+  }
+
+  /** For the read-back: a page that did not load is an error (so the outcome
+   * is unknown), never "not there". */
+  async function mustRead(d: BrowserDriver, url: string): Promise<XArticle[]> {
+    const a = await readArticles(d, url);
+    if (!a) throw new Error(`${url} did not load`);
+    return a;
   }
 
   async function checkSession(d: BrowserDriver): Promise<SessionState> {
@@ -159,7 +171,9 @@ export function makeXAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
       const dup = xOwnMatch(arts, me, ctx.body, ctx.target.ref, null);
       if (dup) return refused("duplicate_present", `an identical reply by ${me} is already there (status ${dup.id}); nothing sent`);
     } else {
-      const dup = xOwnMatch(await readArticles(d, `https://x.com/${me}`), me, ctx.body, null, null);
+      const own = await readArticles(d, `https://x.com/${me}`);
+      if (!own) return refused("page_not_loaded", `the profile ${me} showed neither posts nor its empty-state marker, so the duplicate check cannot run; nothing sent`);
+      const dup = xOwnMatch(own, me, ctx.body, null, null);
       if (dup) return refused("duplicate_present", `an identical post by ${me} is already on the profile (status ${dup.id}); nothing sent`);
       await d.goto(start);
     }
@@ -184,7 +198,7 @@ export function makeXAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
     if (ctx.allowMentions && st.mentionLinks > findMentions(ctx.body).length) {
       return refused("mention_link", `the composer holds ${st.mentionLinks} mention link(s), more than the approved text names; nothing sent`);
     }
-    if (normalizeWs(st.text) !== normalizeWs(ctx.body)) {
+    if (normalizeLines(st.text) !== normalizeLines(ctx.body)) {
       return refused("text_mismatch", "the composer does not hold the approved text; nothing sent");
     }
     if (st.media !== want) return refused("media_count", `the composer shows ${st.media} of ${want} media; nothing sent`);
@@ -201,9 +215,9 @@ export function makeXAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
     });
 
     const first = reply
-      ? async () => xOwnMatch(await readArticles(d, `https://x.com/i/status/${ctx.target.ref}`), me, ctx.body, ctx.target.ref, since)
-      : async () => xOwnMatch(await readArticles(d, `https://x.com/${me}`), me, ctx.body, null, since);
-    const rest = [async () => xOwnMatch(await readArticles(d, `https://x.com/${me}/with_replies`), me, ctx.body, null, since)];
+      ? async () => xOwnMatch(await mustRead(d, `https://x.com/i/status/${ctx.target.ref}`), me, ctx.body, ctx.target.ref, since)
+      : async () => xOwnMatch(await mustRead(d, `https://x.com/${me}`), me, ctx.body, null, since);
+    const rest = [async () => xOwnMatch(await mustRead(d, `https://x.com/${me}/with_replies`), me, ctx.body, null, since)];
     const rb = await readback(d, T.readbackTries, T.readbackStepMs, first, rest);
     if (rb.hit && rb.hit.id) {
       const media = rb.hit.media === want ? "" : `; read back with ${rb.hit.media} of ${want} media`;
@@ -223,5 +237,6 @@ export function makeXAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
     checkSession,
     post,
     submitSelectors: [S.submit],
+    submitLabels: X_SUBMIT_LABELS,
   };
 }

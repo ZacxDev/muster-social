@@ -14,6 +14,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+# the README installs with `npm install -g --prefix ~/.local .`, which puts the binary here
 ExecStart=%h/.local/bin/muster-social run
 Restart=on-failure
 RestartSec=30

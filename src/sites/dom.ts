@@ -74,22 +74,38 @@ export function segments(root: El): Segment[] {
   return out;
 }
 
-/** The text of `root`, links included as their shown text. */
+/** The text of `root` as an editor shows it, links included as their shown
+ * text: each block element (a Draft.js block <div>, a Quill <p>) is one line,
+ * a <br> is a line break, so an empty block (<p><br></p>) is an empty line.
+ * The pre-click check compares this line by line (text.ts normalizeLines). */
 export function plainText(root: El): string {
   let s = "";
+  let pendingBreak = false;
+  const emit = (t: string) => {
+    if (!t) return;
+    if (pendingBreak && s !== "" && !s.endsWith("\n")) s += "\n";
+    pendingBreak = false;
+    s += t;
+  };
   const walk = (n: El) => {
     for (const c of Array.from(n.childNodes)) {
-      if (c.nodeType === 3) s += c.nodeValue ?? "";
-      else if (c.nodeType === 1) {
+      if (c.nodeType === 3) {
+        const v = c.nodeValue ?? "";
+        // Markup indentation between blocks (whitespace holding a newline) is
+        // not text: a browser collapses it, and an editor encodes a typed line
+        // break as a block or a <br>, never as a raw newline text node.
+        if (/^\s*$/u.test(v) && v.includes("\n")) continue;
+        emit(v);
+      } else if (c.nodeType === 1) {
         const tag = c.tagName.toUpperCase();
         if (SKIP.has(tag)) continue;
-        if (tag === "BR") s += "\n";
-        else if (tag === "IMG") s += c.getAttribute("alt") ?? "";
+        if (tag === "BR") emit("\n");
+        else if (tag === "IMG") emit(c.getAttribute("alt") ?? "");
         else {
           const block = BLOCK.has(tag);
-          if (block) s += "\n";
+          if (block) pendingBreak = true;
           walk(c);
-          if (block) s += "\n";
+          if (block) pendingBreak = true;
         }
       }
     }

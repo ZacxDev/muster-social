@@ -9,6 +9,20 @@ export function normalizeWs(s: string): string {
   return s.replace(/\s+/gu, " ").trim();
 }
 
+/** For the PRE-CLICK check: line structure kept. CRLF/CR become LF, a
+ * no-break space becomes a space, trailing spaces on each line and leading or
+ * trailing blank lines are dropped. Line breaks are NOT collapsed: "a\nb" and
+ * "a b" differ, and so do "a\nb" and "a\n\nb". */
+export function normalizeLines(s: string): string {
+  return s
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\u00A0/gu, " ")
+    .split("\n")
+    .map((l) => l.replace(/[ \t]+$/u, ""))
+    .join("\n")
+    .replace(/^\n+|\n+$/gu, "");
+}
+
 /** An `@word` (or the fullwidth `＠word`) that a site would turn into a mention.
  * An e-mail address is not one: the `@` there follows a letter or digit. */
 const MENTION_RE = /(^|[^\p{L}\p{N}_])[@＠]([A-Za-z0-9_]+)/gu;
@@ -74,14 +88,22 @@ export function isLink(s: Segment): s is { text: string; href: string } {
   return "href" in s;
 }
 
-/** Does a rendered link stand for `url`? Its shown text (scheme, `www.` and a
- * trailing ellipsis removed) is a prefix of the URL, or its href is the URL, or
- * the link goes through a shortener. */
+/** Does a rendered link stand for `url`?
+ * - its href is the URL; or
+ * - its shown text (scheme, `www.` and a trailing ellipsis removed) is a
+ *   prefix of the URL. A shortener href (X's t.co) does NOT excuse a shown
+ *   text naming another URL: `blog.example.com/post-1…` never stands for
+ *   `…/post-2`; or
+ * - its shown text is itself a shortener link (LinkedIn shows `lnkd.in/…`), or
+ *   it is empty with a shortener href: the target cannot be read from the
+ *   page, so the link is accepted for any URL. That case is ambiguous by
+ *   construction (README, "Read-back"). */
 export function linkStandsFor(link: { text: string; href: string }, url: string): boolean {
   const want = bareUrl(url);
   const shown = bareUrl(normalizeWs(link.text).replace(/(?:…|\.\.\.)$/u, ""));
-  if (SHORTENER_HOSTS.includes(hostOf(link.href)) || SHORTENER_HOSTS.includes(hostOf(shown))) return true;
   if (bareUrl(link.href) === want) return true;
+  if (SHORTENER_HOSTS.includes(hostOf(shown))) return true;
+  if (shown === "") return SHORTENER_HOSTS.includes(hostOf(link.href));
   return shown.length >= 4 && want.startsWith(shown);
 }
 

@@ -9,18 +9,42 @@ export function isVenue(v: string): v is Venue {
   return (VENUES as readonly string[]).includes(v);
 }
 
+/** Checks the driver runs on the RESOLVED element, in the page, immediately
+ * before acting on it (src/sites/target.ts). */
+export interface ActionGuard {
+  /** Refuse an element that matches, sits inside, or contains any of these. */
+  forbid?: readonly string[];
+  /** Refuse an element inside a button whose text or aria-label is one of these
+   * (lower-case, exact), or a submit-type button. */
+  labels?: readonly string[];
+  /** Refuse an element that does not itself match one of these. */
+  require?: readonly string[];
+}
+
+export interface ActionOpts {
+  guard?: ActionGuard;
+  /** Runs after the element is resolved and passed the guard, and before the
+   * action: the gate's journal record goes here, so record and click concern
+   * the same element. A throw here cancels the action. */
+  beforeAct?: () => unknown;
+}
+
+/** A driver action refused because of what its target element is. */
+export class ForbiddenTarget extends Error {}
+
 /** What a site adapter may do to a page. Every read is html(): the page's
- * serialised DOM, parsed by the adapter (src/sites/dom.ts). */
+ * serialised DOM, parsed by the adapter (src/sites/dom.ts). Every action
+ * resolves its selector to ONE element first and acts on that element. */
 export interface BrowserDriver {
   goto(url: string): Promise<void>;
   html(): Promise<string>;
-  /** Focus the element and insert `text` as typed input. */
-  insertText(selector: string, text: string): Promise<void>;
+  /** Click the element, then insert `text` as typed input. */
+  insertText(selector: string, text: string, opts?: ActionOpts): Promise<void>;
   /** Attach files: set them on a file input, or (viaChooser) click a trigger
    * and answer the file chooser it opens. */
-  attachFiles(selector: string, paths: string[], opts?: { viaChooser?: boolean }): Promise<void>;
-  /** One trusted click on the first visible match. */
-  click(selector: string): Promise<void>;
+  attachFiles(selector: string, paths: string[], opts?: ActionOpts & { viaChooser?: boolean }): Promise<void>;
+  /** One trusted click on the first match. */
+  click(selector: string, opts?: ActionOpts): Promise<void>;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -106,6 +130,7 @@ export type RefusalCode =
   | "media_count"
   | "button_disabled"
   | "duplicate_present"
+  | "page_not_loaded"
   | "attach_failed";
 
 export interface SessionState {
@@ -123,9 +148,12 @@ export interface SiteAdapter {
   checkSession(driver: BrowserDriver): Promise<SessionState>;
   /** Post one approved draft. Every check before the gate; read-back after. */
   post(ctx: PostContext): Promise<PostOutcome>;
-  /** Selectors of the irreversible submit controls (the guarded driver refuses
-   * a plain click on any of them). */
+  /** Selectors of the irreversible submit controls. Outside the gate, no driver
+   * action may touch an element that is, contains or sits inside one. */
   submitSelectors: readonly string[];
+  /** Labels (lower-case, exact) of the site's post/reply/comment buttons: an
+   * element inside a button with one of these is refused outside the gate too. */
+  submitLabels: readonly string[];
 }
 
 export function refused(code: RefusalCode, detail: string): Refused {

@@ -9,7 +9,7 @@ import { Journal, isUnresolved, resultFor, type DraftState } from "./journal.ts"
 import { resolveRef, sha256Hex, stage } from "./media.ts";
 import { checkDraft, describe } from "./rules.ts";
 import { MusterError, type Claim } from "./muster/client.ts";
-import type { BrowserDriver, LocalMedia, PostOutcome, SiteAdapter, Venue } from "./sites/types.ts";
+import { ForbiddenTarget, type ActionGuard, type BrowserDriver, type LocalMedia, type PostOutcome, type SiteAdapter, type Venue } from "./sites/types.ts";
 import { isVenue } from "./sites/types.ts";
 import type { SiteConfig } from "./config.ts";
 
@@ -35,6 +35,9 @@ export interface PosterDeps {
   log: (msg: string) => void;
   /** A claim may wait this long in-process for its site's pacing gap. */
   maxPacingWaitMs?: number;
+  /** muster's claim lease (2 minutes) and the margin the click must leave. */
+  leaseMs?: number;
+  leaseMarginMs?: number;
 }
 
 export type HandleOutcome =
@@ -43,21 +46,24 @@ export type HandleOutcome =
   | { action: "refused"; code: string; detail: string }
   | { action: "already-attempted" };
 
-/** A click on a submit control outside the gate. */
-export class UngatedSubmit extends Error {}
+/** A gate call refused because the claim's lease is nearly spent. */
+export class LeaseTooShort extends Error {}
 
-/** The adapter's driver: every call passes through, except a plain click on a
- * submit control, which only the gate may make. */
-export function guardDriver(raw: BrowserDriver, submitSelectors: readonly string[]): BrowserDriver {
+/** The adapter's driver. Every action (click, insertText, attachFiles, the
+ * chooser click included) carries a guard the driver checks on the RESOLVED
+ * element, in the page, right before acting: an element that is, sits inside
+ * or contains a submit control, or sits in a button labelled like one, is
+ * refused (ForbiddenTarget). Whatever guard or hook the adapter passes is
+ * replaced, so only the gate can reach a submit control. Selector spelling
+ * does not matter: the check is on the element. */
+export function guardDriver(raw: BrowserDriver, adapter: Pick<SiteAdapter, "submitSelectors" | "submitLabels">): BrowserDriver {
+  const guard: ActionGuard = { forbid: adapter.submitSelectors, labels: adapter.submitLabels };
   return {
     goto: (u) => raw.goto(u),
     html: () => raw.html(),
-    insertText: (s, t) => raw.insertText(s, t),
-    attachFiles: (s, p, o) => raw.attachFiles(s, p, o),
-    click: async (s) => {
-      if (submitSelectors.includes(s)) throw new UngatedSubmit(`refused a click on submit control ${s} outside the journaled gate`);
-      return raw.click(s);
-    },
+    insertText: (s, t) => raw.insertText(s, t, { guard }),
+    attachFiles: (s, p, o) => raw.attachFiles(s, p, { guard, ...(o?.viaChooser ? { viaChooser: true } : {}) }),
+    click: (s) => raw.click(s, { guard }),
     sleep: (ms) => raw.sleep(ms),
     now: () => raw.now(),
   };
@@ -66,10 +72,14 @@ export function guardDriver(raw: BrowserDriver, submitSelectors: readonly string
 export class Poster {
   private readonly d: PosterDeps;
   private readonly maxPacingWaitMs: number;
+  private readonly leaseMs: number;
+  private readonly leaseMarginMs: number;
 
   constructor(deps: PosterDeps) {
     this.d = deps;
-    this.maxPacingWaitMs = deps.maxPacingWaitMs ?? 60_000;
+    this.maxPacingWaitMs = deps.maxPacingWaitMs ?? 30_000;
+    this.leaseMs = deps.leaseMs ?? 120_000;
+    this.leaseMarginMs = deps.leaseMarginMs ?? 30_000;
   }
 
   /** Milliseconds until `venue` may post again (0 when it may now). */
@@ -106,6 +116,7 @@ export class Poster {
   async handle(c: Claim): Promise<HandleOutcome> {
     const J = this.d.journal;
     const id = c.draft_id;
+    const claimedAt = this.d.now();
     const prior = J.get(id);
     if (prior && (prior.open || prior.refused || prior.resolved)) {
       // muster never offers a draft twice; if it ever did, it is not tried again.
@@ -180,13 +191,23 @@ export class Poster {
       const gate = async (selector: string) => {
         if (gateUsed) throw new Error("the submit gate opens once per draft");
         gateUsed = true;
-        if (!adapter.submitSelectors.includes(selector)) throw new Error(`${selector} is not a submit control of ${venue}`);
-        J.append({ t: "open", draft_id: id, venue, at: this.d.now() }); // fsynced before the click
-        armed = true;
-        await raw.click(selector);
+        // Never click so late that muster may already call the draft unconfirmed.
+        const age = this.d.now() - claimedAt;
+        if (age > this.leaseMs - this.leaseMarginMs) {
+          throw new LeaseTooShort(`the claim is ${Math.round(age / 1000)}s old; muster's ${this.leaseMs / 1000}s lease would leave under ${this.leaseMarginMs / 1000}s for the click and read-back`);
+        }
+        // The driver resolves the element, checks it IS a submit control, runs
+        // beforeAct (the journal record, fsynced), then clicks that element.
+        await raw.click(selector, {
+          guard: { require: adapter.submitSelectors },
+          beforeAct: () => {
+            J.append({ t: "open", draft_id: id, venue, at: this.d.now() }); // fsynced before the click
+            armed = true;
+          },
+        });
       };
       outcome = await adapter.post({
-        driver: guardDriver(raw, adapter.submitSelectors), body: c.body, media, target: { kind: parsed.kind, ref: parsed.ref },
+        driver: guardDriver(raw, adapter), body: c.body, media, target: { kind: parsed.kind, ref: parsed.ref },
         account: site.account, submit: gate, allowMentions: site.allow_mentions, log: (m) => this.d.log(`draft ${id}: ${m}`),
       });
     } catch (e) {
@@ -210,6 +231,8 @@ export class Poster {
       this.d.log(`draft ${id}: OUTCOME UNKNOWN on ${venue} — not reported, ${venue} paused until the owner resolves it: ${detail}`);
       return { action: "unknown", detail };
     }
+    if (thrown instanceof LeaseTooShort) return refuse("lease", `nothing was clicked: ${thrown.message}`);
+    if (thrown instanceof ForbiddenTarget) return refuse("forbidden_target", `nothing was clicked: ${thrown.message}`);
     if (thrown) return refuse("error", `nothing was clicked: ${errText(thrown)}`);
     if (outcome?.phase === "refused") return refuse(outcome.code, outcome.detail);
     return refuse("error", "the adapter reported a click the gate never made; nothing was clicked");

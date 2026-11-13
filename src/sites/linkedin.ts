@@ -4,8 +4,8 @@
 
 import { all, parse, plainText, segments, type Doc, type El } from "./dom.ts";
 import { DEFAULT_TIMING, idTimeMs, poll, readback, type Timing } from "./common.ts";
-import { LINKEDIN_SELECTORS as S } from "./selectors.ts";
-import { findMentions, normalizeWs, textMatches, type Segment } from "../text.ts";
+import { LINKEDIN_SELECTORS as S, LINKEDIN_SUBMIT_LABELS } from "./selectors.ts";
+import { findMentions, normalizeLines, normalizeWs, textMatches, type Segment } from "../text.ts";
 import {
   refused, type BrowserDriver, type OutboundTarget, type PostContext, type PostOutcome,
   type SessionState, type SiteAdapter, type SiteLimits,
@@ -124,6 +124,23 @@ export function parseLinkedinTarget(t: OutboundTarget): { ok: true; kind: "post"
 
 const postUrl = (activity: string) => `https://www.linkedin.com/feed/update/urn:li:activity:${activity}/`;
 
+/** `sel` inside the post with this activity id (the comment box, its button,
+ * its comments): never another post's on the same page. */
+export const scoped = (activity: string, sel: string) =>
+  sel.split(",").map((p) => `[data-urn="urn:li:activity:${activity}"] ${p.trim()}`).join(", ");
+
+/** Our own update with this text, no older than `since` (ms). */
+export function liOwnUpdate(ups: LiUpdate[], me: string, body: string, since: number | null): LiUpdate | null {
+  return ups.find((u) => u.author === me && textMatches(body, u.segs)
+    && (since === null || (idTimeMs(u.activity, 0n) ?? 0) >= since)) ?? null;
+}
+
+/** Our own comment on post `post` with this text, no older than `since` (ms). */
+export function liOwnComment(cs: LiComment[], post: string, me: string, body: string, since: number | null): LiComment | null {
+  return cs.find((c) => c.post === post && c.author === me && textMatches(body, c.segs)
+    && (since === null || (idTimeMs(c.id, 0n) ?? 0) >= since)) ?? null;
+}
+
 export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapter {
   const T = timing;
   const html = async (d: BrowserDriver) => parse(await d.html());
@@ -144,21 +161,33 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
     return { signedIn: true, account: a.slug, detail: `signed in to LinkedIn as ${a.slug}` };
   }
 
-  async function ownActivity(d: BrowserDriver, me: string): Promise<LiUpdate[]> {
+  /** The member's own activity, or null when the page did not show it loaded:
+   * an empty list counts only beside the empty-state marker. */
+  async function ownActivity(d: BrowserDriver, me: string): Promise<LiUpdate[] | null> {
     await d.goto(`https://www.linkedin.com/in/${encodeURIComponent(me)}/recent-activity/all/`);
-    return (await poll(d, T.loadMs, T.stepMs, async () => {
-      const u = linkedinUpdates(await html(d));
-      return u.length ? u : null;
-    })) ?? [];
+    const got = await poll(d, T.loadMs, T.stepMs, async () => {
+      const doc = await html(d);
+      const u = linkedinUpdates(doc);
+      if (u.length) return { u };
+      return doc.querySelector(S.emptyState) ? { u: [] as LiUpdate[] } : null;
+    });
+    return got ? got.u : null;
   }
 
-  const ownUpdate = (ups: LiUpdate[], me: string, body: string, since: number | null) =>
-    ups.find((u) => u.author === me && textMatches(body, u.segs)
-      && (since === null || (idTimeMs(u.activity, 0n) ?? 0) >= since)) ?? null;
-
-  const ownComment = (cs: LiComment[], post: string, me: string, body: string, since: number | null) =>
-    cs.find((c) => c.post === post && c.author === me && textMatches(body, c.segs)
-      && (since === null || (idTimeMs(c.id, 0n) ?? 0) >= since)) ?? null;
+  /** The comments of post `activity`, polled like posts (they load lazily):
+   * found ones, or, once the wait is over, none, but only if that post's comment
+   * box is on the page (the post loaded). Null when it did not load. */
+  async function postComments(d: BrowserDriver, activity: string): Promise<LiComment[] | null> {
+    const found = await poll(d, T.loadMs, T.stepMs, async () => {
+      const doc = await html(d);
+      const u = linkedinUpdates(doc).find((x) => x.activity === activity);
+      const cs = u ? linkedinComments(u.el) : [];
+      return cs.length ? cs : null;
+    });
+    if (found) return found;
+    const doc = await html(d);
+    return doc.querySelector(scoped(activity, S.commentEditor)) ? [] : null;
+  }
 
   function checkEditor(ctx: PostContext, st: EditorState, want: number): PostOutcome | null {
     if (!st.present || !st.button) return refused("no_composer", "no editor or submit button; nothing sent");
@@ -166,7 +195,7 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
     if (ctx.allowMentions && st.mentions > findMentions(ctx.body).length) {
       return refused("mention_link", `the editor holds ${st.mentions} mention(s), more than the approved text names; nothing sent`);
     }
-    if (normalizeWs(st.text) !== normalizeWs(ctx.body)) return refused("text_mismatch", "the editor does not hold the approved text; nothing sent");
+    if (normalizeLines(st.text) !== normalizeLines(ctx.body)) return refused("text_mismatch", "the editor does not hold the approved text (line by line); nothing sent");
     if (st.media !== want) return refused("media_count", `the editor shows ${st.media} of ${want} media; nothing sent`);
     if (st.disabled !== false) return refused("button_disabled", "the submit button is disabled; nothing sent");
     return null;
@@ -184,7 +213,9 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
     }
 
     if (ctx.target.kind === "post") {
-      const dup = ownUpdate(await ownActivity(d, me), me, ctx.body, null);
+      const ups = await ownActivity(d, me);
+      if (!ups) return refused("page_not_loaded", "the profile's activity showed neither posts nor its empty-state marker, so the duplicate check cannot run; nothing sent");
+      const dup = liOwnUpdate(ups, me, ctx.body, null);
       if (dup) return refused("duplicate_present", `an identical post by ${me} is already on the profile (activity ${dup.activity}); nothing sent`);
       await d.goto(FEED);
       if (!await poll(d, T.loadMs, T.stepMs, async () => !!(await html(d)).querySelector(S.startPost))) {
@@ -197,7 +228,8 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
       await d.insertText(S.postEditor, ctx.body);
       if (want) {
         await d.attachFiles(S.addMedia, ctx.media.map((m) => m.path), { viaChooser: true });
-        // The media editor asks for a confirm step; it is not the post's submit.
+        // The media editor asks for a confirm step; it is not the post's submit
+        // (the guarded driver refuses it if it ever resolves to one).
         if (await poll(d, T.mediaWaitMs, T.stepMs, async () => !!(await html(d)).querySelector(S.mediaNext))) {
           await d.click(S.mediaNext);
         }
@@ -212,8 +244,11 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
       const since = d.now() - T.sinceSlackMs;
       await ctx.submit(S.postSubmit);
       const closed = !!await poll(d, T.clearWaitMs, T.stepMs, async () => !(await html(d)).querySelector(S.postEditor));
-      const rb = await readback(d, T.readbackTries, T.readbackStepMs,
-        async () => ownUpdate(await ownActivity(d, me), me, ctx.body, since), []);
+      const rb = await readback(d, T.readbackTries, T.readbackStepMs, async () => {
+        const ups = await ownActivity(d, me);
+        if (!ups) throw new Error("the profile's activity did not load");
+        return liOwnUpdate(ups, me, ctx.body, since);
+      }, []);
       if (rb.hit) return { phase: "clicked", state: "posted", ref: postUrl(rb.hit.activity), detail: "read back on the profile's activity" };
       return {
         phase: "clicked", state: "unknown",
@@ -222,8 +257,13 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
       };
     }
 
-    // A comment on one of the member's own posts.
+    // A comment on one of the member's own posts. Every comment-box selector is
+    // scoped to THIS post, whose author is checked below.
     const activity = ctx.target.ref;
+    const editorSel = scoped(activity, S.commentEditor);
+    const fileSel = scoped(activity, S.commentFileInput);
+    const previewSel = scoped(activity, S.commentMediaPreview);
+    const submitSel = scoped(activity, S.commentSubmit);
     await d.goto(postUrl(activity));
     const target = await poll(d, T.loadMs, T.stepMs, async () =>
       linkedinUpdates(await html(d)).find((u) => u.activity === activity) ?? null);
@@ -231,31 +271,31 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
     if (target.author !== me) {
       return refused("not_own_post", `post ${activity} is by ${target.author ?? "an unreadable author"}, not ${me}: v0 comments only on your own posts; nothing sent`);
     }
-    const dup = ownComment(linkedinComments(await html(d)), activity, me, ctx.body, null);
+    const comments = await postComments(d, activity);
+    if (!comments) return refused("page_not_loaded", `post ${activity} showed neither comments nor its comment box, so the duplicate check cannot run; nothing sent`);
+    const dup = liOwnComment(comments, activity, me, ctx.body, null);
     if (dup) return refused("duplicate_present", `an identical comment by ${me} is already there (comment ${dup.id}); nothing sent`);
-    if (!await poll(d, T.loadMs, T.stepMs, async () => !!(await html(d)).querySelector(S.commentEditor))) {
-      return refused("no_composer", "no comment box under the post; nothing sent");
-    }
-    await d.insertText(S.commentEditor, ctx.body);
-    if (want) await d.attachFiles(S.commentFileInput, ctx.media.map((m) => m.path));
+    if (!(await html(d)).querySelector(editorSel)) return refused("no_composer", `no comment box under post ${activity}; nothing sent`);
+    await d.insertText(editorSel, ctx.body);
+    if (want) await d.attachFiles(fileSel, ctx.media.map((m) => m.path));
     const st = (await poll(d, want ? T.mediaWaitMs : T.loadMs, T.stepMs, async () => {
-      const s = editorState(await html(d), S.commentEditor, S.commentMediaPreview, S.commentSubmit);
+      const s = editorState(await html(d), editorSel, previewSel, submitSel);
       return s.media === want && s.disabled === false ? s : null;
-    })) ?? editorState(await html(d), S.commentEditor, S.commentMediaPreview, S.commentSubmit);
+    })) ?? editorState(await html(d), editorSel, previewSel, submitSel);
     const bad = checkEditor(ctx, st, want);
     if (bad) return bad;
 
     const since = d.now() - T.sinceSlackMs;
-    await ctx.submit(S.commentSubmit);
+    await ctx.submit(submitSel);
     const cleared = !!await poll(d, T.clearWaitMs, T.stepMs, async () => {
-      const s = editorState(await html(d), S.commentEditor, S.commentMediaPreview, S.commentSubmit);
+      const s = editorState(await html(d), editorSel, previewSel, submitSel);
       return s.present && normalizeWs(s.text) === "" ? s : null;
     });
     const rb = await readback(d, T.readbackTries, T.readbackStepMs, async () => {
       await d.goto(postUrl(activity));
-      const found = await poll(d, T.loadMs, T.stepMs, async () =>
-        ownComment(linkedinComments(await html(d)), activity, me, ctx.body, since));
-      return found;
+      const cs = await postComments(d, activity);
+      if (!cs) throw new Error(`post ${activity} did not load`);
+      return liOwnComment(cs, activity, me, ctx.body, since);
     }, []);
     if (rb.hit) {
       const urn = `urn:li:comment:(activity:${activity},${rb.hit.id})`;
@@ -275,5 +315,6 @@ export function makeLinkedinAdapter(timing: Timing = DEFAULT_TIMING): SiteAdapte
     checkSession,
     post,
     submitSelectors: [S.postSubmit, S.commentSubmit],
+    submitLabels: LINKEDIN_SUBMIT_LABELS,
   };
 }

@@ -4,9 +4,10 @@
 // It never attaches to the owner's everyday browser.
 // UNVERIFIED LIVE: this module has not been run against the live sites.
 
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type ElementHandle, type Page } from "playwright-core";
 import type { BrowserConfig } from "../config.ts";
-import type { BrowserDriver } from "../sites/types.ts";
+import { ForbiddenTarget, type ActionOpts, type BrowserDriver } from "../sites/types.ts";
+import { guardArg, targetProblem } from "../sites/target.ts";
 import type { DriverSession } from "../poster.ts";
 
 const ACTION_TIMEOUT_MS = 15_000;
@@ -22,27 +23,42 @@ class PlaywrightDriver implements BrowserDriver {
   html(): Promise<string> {
     return this.page.content();
   }
-  async insertText(selector: string, text: string): Promise<void> {
-    const el = this.page.locator(selector).first();
-    await el.click({ timeout: ACTION_TIMEOUT_MS });
+  /** Resolve the selector to ONE element handle, run the guard on that element
+   * in the page, then beforeAct. The caller acts on the same handle, so the
+   * element checked is the element acted on. */
+  private async resolve(selector: string, opts?: ActionOpts): Promise<ElementHandle> {
+    const h = await this.page.locator(selector).first().elementHandle({ timeout: ACTION_TIMEOUT_MS });
+    if (!h) throw new Error(`no element matches ${selector}`);
+    if (opts?.guard) {
+      const problem = await h.evaluate(targetProblem, guardArg(opts.guard));
+      if (problem) throw new ForbiddenTarget(`${selector}: ${problem}`);
+    }
+    if (opts?.beforeAct) await opts.beforeAct();
+    return h;
+  }
+  async insertText(selector: string, text: string, opts?: ActionOpts): Promise<void> {
+    const h = await this.resolve(selector, opts);
+    await h.click({ timeout: ACTION_TIMEOUT_MS });
     await this.page.keyboard.insertText(text);
   }
-  async attachFiles(selector: string, paths: string[], opts?: { viaChooser?: boolean }): Promise<void> {
+  async attachFiles(selector: string, paths: string[], opts?: ActionOpts & { viaChooser?: boolean }): Promise<void> {
+    const h = await this.resolve(selector, opts);
     if (opts?.viaChooser) {
       const [chooser] = await Promise.all([
         this.page.waitForEvent("filechooser", { timeout: ACTION_TIMEOUT_MS }),
-        this.page.locator(selector).first().click({ timeout: ACTION_TIMEOUT_MS }),
+        h.click({ timeout: ACTION_TIMEOUT_MS }),
       ]);
       await chooser.setFiles(paths);
       return;
     }
-    await this.page.locator(selector).first().setInputFiles(paths, { timeout: ACTION_TIMEOUT_MS });
+    await h.setInputFiles(paths, { timeout: ACTION_TIMEOUT_MS });
   }
-  async click(selector: string): Promise<void> {
+  async click(selector: string, opts?: ActionOpts): Promise<void> {
+    const h = await this.resolve(selector, opts);
     // Playwright waits for the element to be visible, stable, enabled and to
     // receive the pointer event at its centre (nothing covering it) before it
     // clicks, and clicks once.
-    await this.page.locator(selector).first().click({ timeout: ACTION_TIMEOUT_MS });
+    await h.click({ timeout: ACTION_TIMEOUT_MS });
   }
   sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));

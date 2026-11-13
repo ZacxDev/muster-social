@@ -1,23 +1,39 @@
 // A fake browser driver over fake sites. Each site renders HTML shaped like the
 // selector table expects (src/sites/selectors.ts) and changes state on the
 // driver's actions, so an adapter runs its real parse/check/read-back code
-// against it. No network, no real browser.
+// against it. Like the real driver, every action first resolves its selector
+// to ONE element of the current page, runs the guard on that element
+// (src/sites/target.ts, the same function the real driver ships into the
+// page), runs beforeAct, and only then acts on that element. The fake sites
+// decide what an action does from the ELEMENT (el.matches), never from the
+// selector's spelling. No network, no real browser.
 
-import type { BrowserDriver } from "../../src/sites/types.ts";
+import { parse, type El } from "../../src/sites/dom.ts";
+import { ForbiddenTarget, type ActionOpts, type BrowserDriver } from "../../src/sites/types.ts";
+import { guardArg, targetProblem } from "../../src/sites/target.ts";
 import { X_SELECTORS as XS, LINKEDIN_SELECTORS as LS } from "../../src/sites/selectors.ts";
 import { findUrls } from "../../src/text.ts";
+
+/** A resolved element, as the fake sites see it. */
+export interface FakeEl {
+  matches(sel: string): boolean;
+  closest(sel: string): FakeEl | null;
+  getAttribute(name: string): string | null;
+}
 
 export interface FakeSite {
   render(url: string): string;
   goto(url: string): void;
-  insertText(url: string, selector: string, text: string): void;
-  attach(url: string, selector: string, paths: string[], viaChooser: boolean): void;
-  click(url: string, selector: string): void;
+  insertText(url: string, el: FakeEl, text: string): void;
+  attach(url: string, el: FakeEl, paths: string[], viaChooser: boolean): void;
+  click(url: string, el: FakeEl): void;
 }
 
 export class FakeDriver implements BrowserDriver {
   t: number;
   url = "about:blank";
+  /** Every element action that reached the site: [kind, selector]. */
+  actions: [string, string][] = [];
   clicks: string[] = [];
   submits = 0;
   readonly site: FakeSite;
@@ -30,6 +46,23 @@ export class FakeDriver implements BrowserDriver {
     this.submitSelectors = submitSelectors;
     this.t = startMs;
   }
+
+  private async resolve(selector: string, opts?: ActionOpts): Promise<FakeEl> {
+    const doc = parse(this.site.render(this.url));
+    const el = doc.querySelector(selector) as unknown as (Element & FakeEl) | null;
+    if (!el) throw new Error(`no element matches ${selector}`);
+    if (opts?.guard) {
+      const problem = targetProblem(el, guardArg(opts.guard));
+      if (problem) throw new ForbiddenTarget(`${selector}: ${problem}`);
+    }
+    if (opts?.beforeAct) await opts.beforeAct();
+    return el;
+  }
+
+  private isSubmit(el: FakeEl): boolean {
+    return this.submitSelectors.some((s) => el.matches(s));
+  }
+
   async goto(url: string): Promise<void> {
     this.url = url;
     this.site.goto(url);
@@ -37,19 +70,31 @@ export class FakeDriver implements BrowserDriver {
   async html(): Promise<string> {
     return this.site.render(this.url);
   }
-  async insertText(selector: string, text: string): Promise<void> {
-    this.site.insertText(this.url, selector, text);
+  async insertText(selector: string, text: string, opts?: ActionOpts): Promise<void> {
+    const el = await this.resolve(selector, opts);
+    this.actions.push(["insertText", selector]);
+    if (this.isSubmit(el)) this.submits++; // insertText clicks its target first
+    this.site.click(this.url, el);
+    this.site.insertText(this.url, el, text);
   }
-  async attachFiles(selector: string, paths: string[], opts?: { viaChooser?: boolean }): Promise<void> {
-    this.site.attach(this.url, selector, paths, !!opts?.viaChooser);
+  async attachFiles(selector: string, paths: string[], opts?: ActionOpts & { viaChooser?: boolean }): Promise<void> {
+    const el = await this.resolve(selector, opts);
+    this.actions.push(["attachFiles", selector]);
+    if (opts?.viaChooser) {
+      if (this.isSubmit(el)) this.submits++; // the chooser trigger is clicked
+      this.site.click(this.url, el);
+    }
+    this.site.attach(this.url, el, paths, !!opts?.viaChooser);
   }
-  async click(selector: string): Promise<void> {
+  async click(selector: string, opts?: ActionOpts): Promise<void> {
+    const el = await this.resolve(selector, opts);
+    this.actions.push(["click", selector]);
     this.clicks.push(selector);
-    if (this.submitSelectors.includes(selector)) {
+    if (this.isSubmit(el)) {
       if (this.crashOnSubmit) throw this.crashOnSubmit;
       this.submits++;
     }
-    this.site.click(this.url, selector);
+    this.site.click(this.url, el);
   }
   async sleep(ms: number): Promise<void> {
     this.t += ms;
@@ -60,6 +105,13 @@ export class FakeDriver implements BrowserDriver {
 }
 
 export const esc = (s: string) => s.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/"/gu, "&quot;");
+
+/** Editor markup for text: one block per line, an empty line as a block with a
+ * <br>, as Draft.js (`div`) and Quill (`p`) render it. */
+export function blocks(text: string, tag: "div" | "p", inline: (line: string) => string = esc): string {
+  if (text === "") return `<${tag}><br></${tag}>`;
+  return text.split("\n").map((l) => (l === "" ? `<${tag}><br></${tag}>` : `<${tag}><span>${inline(l)}</span></${tag}>`)).join("");
+}
 
 /** Time-ordered id: milliseconds since `epoch` shifted left 22. */
 export function timeId(ms: number, epoch: number): string {
@@ -85,16 +137,19 @@ export interface FakeXOptions {
   onSubmit?: "post" | "drop" | "noop";
   /** The editor changes what was typed (autocorrect, a dropped character…). */
   mangle?: (t: string) => string;
+  /** The editor merges typed line breaks into spaces. */
+  mergeLines?: boolean;
   /** Typed @words become mention links in the composer (X does this). */
   autolinkMentions?: boolean;
-  /** Typed bare URLs become profile links (simulates an unexpected tag). */
+  /** A stray profile link appears in the composer (an unexpected tag). */
   injectMentionLink?: boolean;
   /** Only this many attached files show up. */
   attachLimit?: number;
   buttonAlwaysDisabled?: boolean;
   /** Rendered posts show URLs as t.co links with a truncated display. */
   rewriteLinks?: boolean;
-  /** Pages show their articles only after this many renders (slow load). */
+  /** Profile pages render nothing (no posts, no empty-state marker). */
+  brokenProfile?: boolean;
   clock: () => number;
 }
 
@@ -146,16 +201,20 @@ export class FakeX implements FakeSite {
   }
 
   private composerHtml(): string {
-    let inner = esc(this.composer);
-    if (this.o.autolinkMentions) inner = inner.replace(/(^|\s)@([A-Za-z0-9_]+)/gu, '$1<a href="/$2">@$2</a>');
-    if (this.o.injectMentionLink) inner += ` <a href="/someone">someone</a>`;
+    const inline = (l: string) => {
+      let h = esc(l);
+      if (this.o.autolinkMentions) h = h.replace(/(^|\s)@([A-Za-z0-9_]+)/gu, '$1<a href="/$2">@$2</a>');
+      return h;
+    };
+    let inner = blocks(this.composer, "div", inline);
+    if (this.o.injectMentionLink) inner += `<div><a href="/someone">someone</a></div>`;
     const att = this.attached
       ? `<div data-testid="attachments">${Array.from({ length: this.attached }, () => "<img src='blob:x'>").join("")}</div>` : "";
     const disabled = this.o.buttonAlwaysDisabled || (!this.composer && !this.attached);
     return `<div class="DraftEditor-root"><div data-testid="tweetTextarea_0" contenteditable="true" role="textbox">`
-      + `<div data-contents="true"><div><span data-text="true">${inner}</span></div></div></div></div>${att}`
+      + `<div data-contents="true">${inner}</div></div></div>${att}`
       + `<input type="file" data-testid="fileInput" multiple>`
-      + `<button type="button" data-testid="tweetButtonInline" aria-disabled="${disabled}">Post</button>`;
+      + `<button type="button" data-testid="tweetButtonInline" aria-disabled="${disabled}"><span>Post</span></button>`;
   }
 
   render(url: string): string {
@@ -170,25 +229,27 @@ export class FakeX implements FakeSite {
         const replies = this.posts.filter((p) => p.parent === pg.id);
         main = this.article(parent) + (this.o.account ? this.composerHtml() : "") + replies.map((r) => this.article(r)).join("");
       }
-    } else if (pg.kind === "profile") {
+    } else if (pg.kind === "profile" && !this.o.brokenProfile) {
       const list = this.posts.filter((p) => p.author === pg.user && (pg.replies || p.parent === null)).reverse();
-      main = list.map((p) => this.article(p)).join("");
+      main = list.length ? list.map((p) => this.article(p)).join("") : `<div data-testid="emptyState">Nothing here yet</div>`;
     }
     return `<!doctype html><html><body>${nav}<main>${main}</main></body></html>`;
   }
 
-  insertText(_url: string, selector: string, text: string): void {
-    if (selector !== XS.composer) throw new Error(`fake X: insertText into ${selector}`);
-    this.composer += this.o.mangle ? this.o.mangle(text) : text;
+  insertText(_url: string, el: FakeEl, text: string): void {
+    if (!el.matches(XS.composer)) throw new Error("fake X: typing outside the composer");
+    let t = this.o.mangle ? this.o.mangle(text) : text;
+    if (this.o.mergeLines) t = t.replace(/\n+/gu, " ");
+    this.composer += t;
   }
 
-  attach(_url: string, selector: string, paths: string[]): void {
-    if (selector !== XS.fileInput) throw new Error(`fake X: attach to ${selector}`);
+  attach(_url: string, el: FakeEl, paths: string[]): void {
+    if (!el.matches(XS.fileInput)) throw new Error("fake X: attaching outside the file input");
     this.attached += Math.min(paths.length, this.o.attachLimit ?? paths.length);
   }
 
-  click(url: string, selector: string): void {
-    if (selector !== XS.submit) return;
+  click(url: string, el: FakeEl): void {
+    if (!el.closest(XS.submit)) return;
     const behaviour = this.o.onSubmit ?? "post";
     if (behaviour === "noop") return;
     const pg = this.page(url);
@@ -228,9 +289,16 @@ export interface FakeLinkedinOptions {
   comments?: LiCommentRow[];
   onSubmit?: "post" | "drop" | "noop";
   mangle?: (t: string) => string;
+  mergeLines?: boolean;
   attachLimit?: number;
   /** Posted text shows URLs as lnkd.in links. */
   rewriteLinks?: boolean;
+  /** The activity page renders nothing (no posts, no empty-state marker). */
+  brokenActivity?: boolean;
+  /** Comments appear only after this many renders of the post page. */
+  commentsAfterRenders?: number;
+  /** The media editor's confirm button is really the share box's Post button. */
+  mediaNextIsPost?: "same-class" | "labelled-post";
   clock: () => number;
 }
 
@@ -244,6 +312,8 @@ export class FakeLinkedin implements FakeSite {
   media = 0;
   commentEditor = "";
   commentMedia = 0;
+  commentFor = "";
+  renders = 0;
 
   constructor(o: FakeLinkedinOptions) {
     this.o = o;
@@ -258,6 +328,7 @@ export class FakeLinkedin implements FakeSite {
     this.pendingMedia = 0;
     this.commentEditor = "";
     this.commentMedia = 0;
+    this.renders = 0;
   }
 
   private textHtml(t: string): string {
@@ -271,17 +342,34 @@ export class FakeLinkedin implements FakeSite {
     return out + esc(t.slice(at));
   }
 
-  private update(p: LiPost): string {
+  private update(p: LiPost, inner = ""): string {
     const media = Array.from({ length: p.media }, () => `<div class="update-components-image"><img src="x"></div>`).join("");
     return `<div class="feed-shared-update-v2" data-urn="urn:li:activity:${p.activity}">`
       + `<a class="update-components-actor__meta-link" href="https://www.linkedin.com/in/${p.author}?miniProfileUrn=x">${esc(p.author)}</a>`
-      + `<div class="update-components-text"><span dir="ltr">${this.textHtml(p.text)}</span></div>${media}</div>`;
+      + `<div class="update-components-text"><span dir="ltr">${this.textHtml(p.text)}</span></div>${media}${inner}</div>`;
   }
 
   private comment(c: LiCommentRow): string {
     return `<article class="comments-comment-entity" data-id="urn:li:comment:(activity:${c.post},${c.id})">`
       + `<a class="comments-comment-meta__description-container" href="/in/${c.author}/">${esc(c.author)}</a>`
       + `<div class="comments-comment-item__main-content"><span dir="ltr">${this.textHtml(c.text)}</span></div></article>`;
+  }
+
+  private shareBox(): string {
+    const preview = `<div class="share-creation-state__media-preview">${Array.from({ length: this.media }, () => "<img src='blob:x'>").join("")}</div>`;
+    let mediaEditor = "";
+    if (this.pendingMedia) {
+      const next = this.o.mediaNextIsPost === "same-class"
+        ? `<button class="share-box-footer__primary-btn share-actions__primary-action">Post</button>`
+        : this.o.mediaNextIsPost === "labelled-post"
+          ? `<button class="share-box-footer__primary-btn">Post</button>`
+          : `<button class="share-box-footer__primary-btn">Next</button>`;
+      mediaEditor = `<div class="share-media-editor">${next}</div>`;
+    }
+    const disabled = !this.editor.trim() || this.pendingMedia > 0;
+    return `<div role="dialog"><div class="share-creation-state__text-editor"><div class="ql-editor" contenteditable="true">${blocks(this.editor, "p")}</div></div>`
+      + `${preview}<button aria-label="Add media">Add media</button>${mediaEditor}`
+      + `<div class="share-box-footer"><button class="share-actions__primary-action"${disabled ? " disabled" : ""}>Post</button></div></div>`;
   }
 
   render(url: string): string {
@@ -292,59 +380,68 @@ export class FakeLinkedin implements FakeSite {
     if (p === "/feed/" && me) {
       main = (this.o.hideProfileLink ? "" : `<div class="feed-identity-module"><a href="https://www.linkedin.com/in/${me}/">Me</a></div>`)
         + `<button class="share-box-feed-entry__trigger">Start a post</button>`;
-      if (this.shareOpen) {
-        const preview = `<div class="share-creation-state__media-preview">${Array.from({ length: this.media }, () => "<img src='blob:x'>").join("")}</div>`;
-        const next = this.pendingMedia ? `<button class="share-box-footer__primary-btn">Next</button>` : "";
-        const disabled = !this.editor.trim() || this.pendingMedia > 0;
-        main += `<div role="dialog"><div class="share-creation-state__text-editor"><div class="ql-editor" contenteditable="true"><p>${esc(this.editor)}</p></div></div>`
-          + `${preview}<button aria-label="Add media">Add media</button>${next}`
-          + `<button class="share-actions__primary-action"${disabled ? " disabled" : ""}>Post</button></div>`;
-      }
-    } else if (/^\/in\/[^/]+\/recent-activity\/all\/$/u.test(p) && me) {
+      if (this.shareOpen) main += this.shareBox();
+    } else if (/^\/in\/[^/]+\/recent-activity\/all\/$/u.test(p) && me && !this.o.brokenActivity) {
       const slug = p.split("/")[2];
-      main = this.posts.filter((x) => x.author === slug).reverse().map((x) => this.update(x)).join("");
+      const list = this.posts.filter((x) => x.author === slug).reverse();
+      main = list.length ? list.map((x) => this.update(x)).join("") : `<div class="artdeco-empty-state">No activity yet</div>`;
     } else {
       const m = /^\/feed\/update\/urn:li:activity:(\d+)\/$/u.exec(p);
       const post = m ? this.posts.find((x) => x.activity === m[1]) : undefined;
       if (post && me) {
-        const cs = this.comments.filter((c) => c.post === post.activity).map((c) => this.comment(c)).join("");
-        const preview = this.commentMedia ? `<img class="comments-comment-box__image-preview" src="blob:x">` : "";
-        main = this.update(post) + `<div class="comments-comment-box"><div class="comments-comment-texteditor"><div class="ql-editor" contenteditable="true"><p>${esc(this.commentEditor)}</p></div></div>`
+        this.renders++;
+        const showComments = this.renders > (this.o.commentsAfterRenders ?? 0);
+        const cs = showComments ? this.comments.filter((c) => c.post === post.activity).map((c) => this.comment(c)).join("") : "";
+        const mine = this.commentFor === post.activity;
+        const preview = mine && this.commentMedia ? `<img class="comments-comment-box__image-preview" src="blob:x">` : "";
+        const text = mine ? this.commentEditor : "";
+        const box = `<div class="comments-comment-box"><div class="comments-comment-texteditor"><div class="ql-editor" contenteditable="true">${blocks(text, "p")}</div></div>`
           + `<input type="file" accept="image/*">${preview}`
-          + `<button class="comments-comment-box__submit-button"${this.commentEditor.trim() ? "" : " disabled"}>Comment</button></div>` + cs;
+          + `<button class="comments-comment-box__submit-button"${text.trim() ? "" : " disabled"}>Comment</button></div>`;
+        // A second post on the page, with its own comment box first in the
+        // document: a comment-box selector not scoped to the target post would
+        // reach this one instead.
+        const decoy = this.posts.find((x) => x.activity !== post.activity && x.author !== post.author);
+        const decoyHtml = decoy ? this.update(decoy, `<div class="comments-comment-box"><div class="comments-comment-texteditor"><div class="ql-editor" contenteditable="true"><p><br></p></div></div><button class="comments-comment-box__submit-button" disabled>Comment</button></div>`) : "";
+        main = decoyHtml + this.update(post, box + cs);
       }
     }
     return `<!doctype html><html><body>${nav}<main>${main}</main></body></html>`;
   }
 
-  insertText(_url: string, selector: string, text: string): void {
-    const t = this.o.mangle ? this.o.mangle(text) : text;
-    if (selector === LS.postEditor) this.editor += t;
-    else if (selector === LS.commentEditor) this.commentEditor += t;
-    else throw new Error(`fake LinkedIn: insertText into ${selector}`);
+  private activityOf(el: FakeEl): string {
+    const u = el.closest("[data-urn]");
+    return /urn:li:activity:(\d+)/u.exec(u?.getAttribute("data-urn") ?? "")?.[1] ?? "";
   }
 
-  attach(_url: string, selector: string, paths: string[], viaChooser: boolean): void {
+  insertText(_url: string, el: FakeEl, text: string): void {
+    let t = this.o.mangle ? this.o.mangle(text) : text;
+    if (this.o.mergeLines) t = t.replace(/\n+/gu, " ");
+    if (el.matches(LS.postEditor)) this.editor += t;
+    else if (el.matches(LS.commentEditor)) {
+      this.commentFor = this.activityOf(el);
+      this.commentEditor += t;
+    } else throw new Error("fake LinkedIn: typing outside an editor");
+  }
+
+  attach(_url: string, el: FakeEl, paths: string[], viaChooser: boolean): void {
     const n = Math.min(paths.length, this.o.attachLimit ?? paths.length);
-    if (selector === LS.addMedia && viaChooser) this.pendingMedia = n;
-    else if (selector === LS.commentFileInput && !viaChooser) this.commentMedia = n;
-    else throw new Error(`fake LinkedIn: attach to ${selector} (chooser ${viaChooser})`);
+    if (el.matches(LS.addMedia) && viaChooser) this.pendingMedia = n;
+    else if (el.matches(LS.commentFileInput) && !viaChooser) {
+      this.commentFor = this.activityOf(el);
+      this.commentMedia = n;
+    } else throw new Error("fake LinkedIn: attaching to the wrong element");
   }
 
-  click(url: string, selector: string): void {
+  click(url: string, el: FakeEl): void {
     const p = new URL(url).pathname;
-    if (selector === LS.startPost) {
+    if (el.matches(LS.startPost)) {
       this.shareOpen = true;
-      return;
-    }
-    if (selector === LS.mediaNext) {
-      this.media = this.pendingMedia;
-      this.pendingMedia = 0;
       return;
     }
     const behaviour = this.o.onSubmit ?? "post";
     const me = this.o.account ?? "?";
-    if (selector === LS.postSubmit) {
+    if (el.closest(LS.postSubmit)) {
       if (behaviour === "noop") return;
       const text = this.editor;
       const media = this.media;
@@ -354,13 +451,19 @@ export class FakeLinkedin implements FakeSite {
       if (behaviour === "post") this.posts.push({ activity: timeId(this.o.clock(), 0), author: me, text, media });
       return;
     }
-    if (selector === LS.commentSubmit) {
+    if (el.matches(LS.mediaNext)) {
+      this.media = this.pendingMedia;
+      this.pendingMedia = 0;
+      return;
+    }
+    if (el.closest(LS.commentSubmit)) {
       if (behaviour === "noop") return;
       const m = /urn:li:activity:(\d+)/u.exec(p);
-      const text = this.commentEditor;
+      const post = this.activityOf(el) || (m?.[1] ?? "");
+      const text = this.commentFor === post ? this.commentEditor : "";
       this.commentEditor = "";
       this.commentMedia = 0;
-      if (behaviour === "post" && m) this.comments.push({ post: m[1] ?? "", id: timeId(this.o.clock(), 0), author: me, text });
+      if (behaviour === "post") this.comments.push({ post, id: timeId(this.o.clock(), 0), author: me, text });
     }
   }
 }

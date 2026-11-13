@@ -72,11 +72,17 @@ export class JournalCorrupt extends Error {}
 
 export class Journal {
   readonly path: string;
+  readonly readOnly: boolean;
   private states = new Map<number, DraftState>();
 
-  constructor(path: string) {
+  /** readOnly: for a reader that does not hold the lock (`status`). It never
+   * creates, repairs or appends: a torn tail is skipped in memory only, since
+   * it may be the lock holder's append still in flight. Only the lock holder
+   * repairs. */
+  constructor(path: string, opts: { readOnly?: boolean } = {}) {
     this.path = path;
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    this.readOnly = !!opts.readOnly;
+    if (!this.readOnly) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.load();
   }
 
@@ -86,7 +92,9 @@ export class Journal {
     let text = raw;
     // A torn final line is a record whose fsync never returned, so whatever it
     // was guarding (a click) never ran: drop it, durably.
-    if (raw.length && !raw.endsWith("\n")) {
+    if (raw.length && !raw.endsWith("\n") && this.readOnly) {
+      text = raw.slice(0, raw.lastIndexOf("\n") + 1);
+    } else if (raw.length && !raw.endsWith("\n")) {
       const keep = raw.lastIndexOf("\n") + 1;
       const fd = openSync(this.path, "r+");
       try {
@@ -129,6 +137,7 @@ export class Journal {
 
   /** Append one record and fsync it before returning. Throws on any I/O error. */
   append(r: JournalRecord): void {
+    if (this.readOnly) throw new Error("this journal was opened read-only");
     const created = !existsSync(this.path);
     const fd = openSync(this.path, "a", 0o600);
     try {

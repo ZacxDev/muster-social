@@ -72,13 +72,22 @@ plugin --POST /drafts/{id}/result--> muster  (posted: ok + URL; unknown: nothing
   attached, so editing the original afterwards cannot reach the post.
 - **Pre-click checks**, each its own refusal code: signed in as the configured
   account; for a reply, the target loaded (and on LinkedIn, the post is yours);
-  no identical post of yours already there; the editor's text equals the
-  approved text after whitespace normalisation; no mention link you did not
+  no identical post of yours already there (the page must show it loaded: a
+  list of posts or its empty-state marker; an empty read without one refuses
+  with `page_not_loaded`); the editor's text equals the approved text **line by
+  line** (line breaks and blank lines kept; only trailing spaces on a line and
+  leading or trailing blank lines are ignored); no mention link you did not
   approve (with mentions allowed, no more links than the approved text has
   `@names`); the exact media count; the submit button is enabled.
-- **One gate to the click.** The adapter cannot click a submit control itself:
-  its driver refuses one. It has to call the poster's gate, which opens once per
-  draft, writes the journal's `open` record and fsyncs it, and only then clicks.
+- **One gate to the click.** Every driver action an adapter makes (a click,
+  typing, attaching files, a file-chooser click) first resolves its selector to
+  one element in the page and checks **that element**. It is refused if it is,
+  sits inside or contains one of the site's submit controls, or sits in a button
+  that is `type=submit` or labelled like one ("Post", "Reply", "Comment", …).
+  The selector's spelling does not matter. Only the poster's gate may click a
+  submit control. The gate opens once per draft, resolves the element, checks
+  it IS a submit control, writes the journal's `open` record and fsyncs it, and
+  then clicks that same element.
 - **The attempt journal** (`<state_dir>/journal.jsonl`, append-only, fsynced on
   every record) means a draft is clicked **at most once**, across crashes and
   restarts. A draft that ever had an `open` record is never tried again.
@@ -95,17 +104,32 @@ plugin --POST /drafts/{id}/result--> muster  (posted: ok + URL; unknown: nothing
   redraft. Pre-approval checks keep running, and the log says why it is
   holding. (A draft already claimed for a paused site is still refused without
   a click.)
-- **Read-back tolerates link rewriting.** X shows a URL through `t.co`, often
-  truncated, and LinkedIn through `lnkd.in`. The read-back accepts a link that
-  stands for each approved URL, and everything else must match exactly. It
-  only accepts a post by your account whose id dates from at most a minute
-  before the click.
+- **Never too late for the lease.** muster leases a claimed draft for 2
+  minutes, then shows it **unconfirmed** ("may already have been sent"). The
+  gate refuses to click once a claim is more than 90 s old, leaving 30 s for
+  the click and the read-back. It reports the draft as not sent (`lease`), and
+  muster then hands it back to the officer. Pacing mostly happens before
+  claiming: a claim waits in-process for at most 30 s of its site's gap. A
+  media post that takes long to upload is therefore refused rather than
+  clicked late. A result can still arrive after the lease (the read-back of a
+  click made in time). If muster shows a draft as unconfirmed, wait for the
+  plugin's result before drafting it again.
+- **Read-back tolerates link rewriting, but not a different URL.** X shows a
+  URL through `t.co`, displaying the URL itself (often truncated). A link
+  stands for an approved URL only when its shown text is a prefix of it, so
+  `blog.example.com/post-1…` never matches `…/post-2`. LinkedIn may show the
+  `lnkd.in/…` short link itself. That target cannot be read from the page, so
+  such a link is accepted for any URL: two LinkedIn posts differing only in
+  their URL look identical to the duplicate check. Everything else must match
+  exactly (whitespace-tolerant). It only accepts a post by your account whose
+  id dates from at most a minute before the click, and on LinkedIn a comment on
+  the target post only.
 
 Resolve an unknown attempt after looking at the site yourself:
 
 ```sh
 systemctl --user stop muster-social          # the journal admits one process
-muster-social status                         # lists unresolved attempts
+muster-social status                         # lists unresolved attempts (read-only; safe beside the service)
 muster-social resolve 42 --posted https://x.com/you/status/1234567890
 muster-social resolve 42 --not-posted        # muster then hands it back to the officer
 systemctl --user start muster-social
@@ -119,8 +143,11 @@ Requirements: Node.js 22.18 or newer, and an installed Chrome, Edge or Chromium.
 ```sh
 git clone https://github.com/ZacxDev/muster-social && cd muster-social
 npm ci && npm run build
-npm install -g .            # puts `muster-social` on your PATH
+npm install -g --prefix ~/.local .   # ~/.local/bin/muster-social (the path the service files use)
 ```
+
+The install links to this checkout, so keep the checkout where it is. Put
+`~/.local/bin` on your `PATH`.
 
 ## Set up
 
@@ -164,9 +191,11 @@ systemctl --user enable --now muster-social
 journalctl --user -u muster-social -f
 ```
 
-**macOS (launchd):** in `contrib/com.github.muster-social.plist`, set the
-binary path and replace `YOU` in the log paths (launchd does not expand `~`).
-Logs go to `~/Library/Logs/muster-social.log`. Then
+**macOS (launchd):** in `contrib/com.github.muster-social.plist`, replace
+`YOU` in the two log paths (launchd does not expand `~`). Logs go to
+`~/Library/Logs/muster-social.log`. The plist runs `~/.local/bin/muster-social`
+through `/bin/sh`, which turns exit code 3 into a clean exit so launchd does not
+restart it. Then
 
 ```sh
 cp contrib/com.github.muster-social.plist ~/Library/LaunchAgents/
@@ -174,8 +203,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.muster-social
 ```
 
 The service stops only between steps, never mid-post. Exit code 3 means muster
-refused the token (revoked, or missing a capability), and the units do not
-restart on it.
+refused the token (revoked, or missing a capability). Neither unit restarts on
+it: systemd through `RestartPreventExitStatus=3`, launchd through the wrapper
+above.
 
 ## The browser
 
@@ -254,21 +284,30 @@ Unknown keys are an error, so a typo cannot silently turn a guard off.
 Nothing here has been run against the live x.com or linkedin.com. In
 particular:
 
-- **Every selector** in `src/sites/selectors.ts`. The X ones are the site's
-  long-standing `data-testid` attributes. The LinkedIn ones are its visible
-  class names, which change more often; the share box's media flow
-  ("Add media", then a confirm step) and the comment box's file input are the
-  least certain.
-- That the X composer's and the LinkedIn editor's serialised DOM reads back as
-  the typed text, with emoji as image `alt` text.
+- **Every selector** in `src/sites/selectors.ts`. These are attributes and
+  class names observed on the sites' pages, not a documented interface: X's
+  `data-testid`s and LinkedIn's class names, which change more often. The least
+  certain are the share box's media flow ("Add media", then a confirm step
+  inside the media editor), the comment box (assumed to sit inside its post's
+  `[data-urn]` element), the comment file input, and the two empty-state
+  markers.
+- That typing keeps line breaks, and that the X composer's and the LinkedIn
+  editor's serialised DOM reads back as the typed text: one block per line,
+  emoji as image `alt` text. Fixtures model that structure
+  (`test/fixtures/*/…-multiline.html`). If a live editor differs, the
+  pre-click check refuses.
 - That LinkedIn activity and comment ids carry a millisecond timestamp in
   their top bits, as X status ids do. The read-back relies on it to ignore
   older posts.
 - Playwright's file-chooser handling on LinkedIn's "Add media".
 
 All of these fail **closed**. A selector that matches nothing refuses before
-the click. A read-back that finds nothing after the click is `unknown`, which
-pauses the site and is never reported as failed. Expect the first live runs to
+the click. An empty duplicate-check read counts only beside the page's
+empty-state marker; otherwise it is `page_not_loaded`. LinkedIn comments are
+polled like posts, and an empty list is trusted only once the post's own
+comment box has loaded. A read-back that finds nothing, or a page that does
+not load after the click, is `unknown`, which pauses claiming and is never
+reported as failed. Expect the first live runs to
 refuse more drafts than they should. Fix the selector table and add a fixture
 for what the live page really looks like.
 
@@ -288,6 +327,7 @@ src/
   media.ts            ref resolution, sniffing, hashing, staging
   sites/types.ts      BrowserDriver and SiteAdapter interfaces
   sites/selectors.ts  every selector, one table per site
+  sites/target.ts     the element check every driver action runs in the page
   sites/x.ts, sites/linkedin.ts   the adapters
   sites/dom.ts        HTML parsing (the same code reads live pages and fixtures)
   browser/playwright.ts   the real driver
@@ -303,7 +343,7 @@ against a live page. The only things a driver does to a page are `goto`,
 Write `src/sites/<site>.ts` implementing `SiteAdapter`: limits, target parsing,
 a session check, and `post()`, which runs its pre-click checks, calls
 `ctx.submit(<selector>)` exactly once, and reads back. Put its selectors in
-`selectors.ts`, list its submit selectors in `submitSelectors`, add a fake site
+`selectors.ts`, list its submit selectors in `submitSelectors` and its post-button labels in `submitLabels`, add a fake site
 to `test/helpers/fakeBrowser.ts`, and add the site's mutants to
 `scripts/mutation-check.mjs`.
 

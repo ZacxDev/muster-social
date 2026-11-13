@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { makeXAdapter, xAccount, xArticles, xOwnMatch } from "../src/sites/x.ts";
+import { makeXAdapter, xAccount, xArticles, xComposer, xOwnMatch } from "../src/sites/x.ts";
+import { normalizeLines } from "../src/text.ts";
 import { parse } from "../src/sites/dom.ts";
 import { guardDriver } from "../src/poster.ts";
 import type { LocalMedia, PostOutcome } from "../src/sites/types.ts";
@@ -21,7 +22,7 @@ async function run(o: Partial<Omit<FakeXOptions, "clock">>, body: string, extra:
   drv = driver;
   const gate: string[] = [];
   const out: PostOutcome = await X.post({
-    driver: guardDriver(driver, X.submitSelectors), body, media: media(extra.media ?? 0),
+    driver: guardDriver(driver, X), body, media: media(extra.media ?? 0),
     target: extra.reply ? { kind: "reply", ref: PARENT } : { kind: "post", ref: "" },
     account: ME, allowMentions: !!extra.allowMentions, log: () => undefined,
     submit: async (sel) => {
@@ -88,9 +89,35 @@ test("x pre-click: the editor not holding the approved text refuses (text_mismat
   assert.equal(r.driver.submits, 0);
 });
 
-test("x pre-click: whitespace differences alone are not a mismatch", async () => {
-  const r = await run({ mangle: (t) => t.replace(/ /gu, "  ") }, "a b c");
-  assert.equal(r.out.phase === "clicked" && r.out.state, "posted");
+test("x pre-click: trailing spaces on a line are not a mismatch; a changed space inside one is", async () => {
+  const ok = await run({ mangle: (t) => t.replace(/\n/gu, "  \n") + " " }, "a b\nc");
+  assert.equal(ok.out.phase === "clicked" && ok.out.state, "posted");
+  refusedWith((await run({ mangle: (t) => t.replace(/ /gu, "  ") }, "a b c")).out, "text_mismatch");
+});
+
+test("x pre-click: line breaks are kept; an editor that merges lines refuses (text_mismatch)", async () => {
+  const body = "Three things:\n1. ship\n\n2. test";
+  const ok = await run({}, body);
+  assert.equal(ok.out.phase === "clicked" && ok.out.state, "posted");
+  const merged = await run({ mergeLines: true }, body);
+  refusedWith(merged.out, "text_mismatch");
+  assert.equal(merged.driver.submits, 0);
+});
+
+test("x: a profile that did not load (no posts, no empty-state marker) refuses before typing (page_not_loaded)", async () => {
+  const r = await run({ brokenProfile: true }, "a new post");
+  refusedWith(r.out, "page_not_loaded");
+  assert.equal(r.driver.submits, 0);
+  assert.deepEqual(r.driver.actions, [], "nothing was typed");
+});
+
+test("x read-back: another account's identical reply is not ours", () => {
+  const arts = [
+    { author: "someone_else", id: PARENT, segs: [{ text: "parent" }], media: 0 },
+    { author: "copycat", id: timeId(Date.UTC(2026, 0, 3), X_EPOCH), segs: [{ text: "same words" }], media: 0 },
+  ];
+  assert.equal(xOwnMatch(arts, ME, "same words", PARENT, null), null);
+  assert.ok(xOwnMatch(arts, "copycat", "same words", PARENT, null));
 });
 
 test("x pre-click: an unexpected mention link refuses (mention_link)", async () => {
@@ -154,8 +181,8 @@ test("x fixture: account, articles, emoji alt, t.co link and hashtag parse", () 
   ]);
   const mine = xOwnMatch(arts, "EXAMPLE_ME", "A small tool for it 🚀 https://github.com/example/project #buildinpublic", "1855000000000000000", null);
   assert.equal(mine?.id, "1855000000000000123");
-  assert.equal(xOwnMatch(arts, "example_me", "A small tool for it 🚀 https://example.org/elsewhere #buildinpublic", "1855000000000000000", null)?.id,
-    "1855000000000000123", "a t.co link cannot be traced to its target, so any URL matches it");
+  assert.equal(xOwnMatch(arts, "example_me", "A small tool for it 🚀 https://example.org/elsewhere #buildinpublic", "1855000000000000000", null), null,
+    "a t.co link whose shown text names another URL does not match");
   assert.equal(xOwnMatch(arts, "example_me", "A small tool for it https://github.com/example/project #buildinpublic", "1855000000000000000", null), null,
     "the missing emoji is a mismatch");
 });
@@ -163,4 +190,9 @@ test("x fixture: account, articles, emoji alt, t.co link and hashtag parse", () 
 test("x fixture: a signed-out page has no account", () => {
   const doc = parse(readFileSync(new URL("./fixtures/x/home-signed-out.html", import.meta.url), "utf8"));
   assert.equal(xAccount(doc), null);
+});
+
+test("x fixture: a multi-line Draft.js composer reads back line by line", () => {
+  const doc = parse(readFileSync(new URL("./fixtures/x/composer-multiline.html", import.meta.url), "utf8"));
+  assert.equal(normalizeLines(xComposer(doc).text), "Three things:\n1. ship\n\n2. test");
 });

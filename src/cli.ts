@@ -158,7 +158,8 @@ async function main(argv: string[]): Promise<number> {
     }
     case "status": {
       const cfg = loadConfig(configPath);
-      const journal = new Journal(join(cfg.state_dir, "journal.jsonl"));
+      // read-only: `status` runs beside the daemon and must never repair (truncate) its journal
+      const journal = new Journal(join(cfg.state_dir, "journal.jsonl"), { readOnly: true });
       const unresolved = journal.unresolved();
       for (const [v, s] of Object.entries(cfg.sites)) {
         if (!s?.enabled) continue;
