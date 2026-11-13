@@ -1,0 +1,27 @@
+{
+  "server_url": "https://muster.example.com",
+  "media_root": "~/muster-media",
+  "claim_wait_seconds": 25,
+  "check_session": true,
+  "check_interval_seconds": 30,
+  "browser": {
+    "mode": "persistent",
+    "user_data_dir": "~/.local/share/muster-social/profile",
+    "channel": "chrome",
+    "headless": false
+  },
+  "sites": {
+    "x": {
+      "enabled": true,
+      "account": "your_handle",
+      "min_gap_seconds": 900,
+      "allow_mentions": false
+    },
+    "linkedin": {
+      "enabled": false,
+      "account": "your-profile-slug",
+      "min_gap_seconds": 1800,
+      "allow_mentions": false
+    }
+  }
+}

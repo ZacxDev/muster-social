@@ -1,0 +1,27 @@
+# systemd user unit. Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/muster-social.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now muster-social
+# Logs: journalctl --user -u muster-social -f
+#
+# The browser needs your graphical session (persistent mode launches a
+# visible window by default), so this runs as YOUR user, in your session.
+[Unit]
+Description=muster-social: post owner-approved muster drafts to social sites
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/muster-social run
+Restart=on-failure
+RestartSec=30
+# exit 3 = the token was revoked or lacks a capability: restarting cannot fix it
+RestartPreventExitStatus=3
+# finish the current post before stopping (never killed mid-click)
+TimeoutStopSec=300
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=graphical-session.target
