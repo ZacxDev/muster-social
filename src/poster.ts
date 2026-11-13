@@ -80,14 +80,27 @@ export class Poster {
     return Math.max(0, last + site.min_gap_seconds * 1000 - this.d.now());
   }
 
-  /** Claim only when every enabled site could post within the in-lease wait, so
-   * a claimed draft is never bounced back for pacing alone. */
-  readyToClaim(): { ready: boolean; waitMs: number } {
+  /** Claim only when every enabled site could post within the in-lease wait,
+   * and no enabled site has an unresolved attempt. muster's claim is not
+   * scoped to a site, so a draft claimed for a paused or paced site could only
+   * be refused, and a refusal sends the officer to redraft: rather than loop
+   * that way, nothing is claimed until the owner resolves the attempt (the
+   * pre-approval checks keep running meanwhile). */
+  readyToClaim(): { ready: boolean; waitMs: number; reason: string } {
     let worst = 0;
+    const paused: string[] = [];
     for (const [v, s] of Object.entries(this.d.sites)) {
-      if (s?.enabled && isVenue(v)) worst = Math.max(worst, this.pacingRemainingMs(v));
+      if (!s?.enabled || !isVenue(v)) continue;
+      worst = Math.max(worst, this.pacingRemainingMs(v));
+      for (const u of this.d.journal.unresolved(v)) paused.push(`${v} (draft ${u.draftId})`);
     }
-    return { ready: worst <= this.maxPacingWaitMs, waitMs: Math.max(0, worst - this.maxPacingWaitMs) };
+    if (paused.length) {
+      return { ready: false, waitMs: 30_000, reason: `unresolved attempt on ${paused.join(", ")}; run \`muster-social resolve\`` };
+    }
+    if (worst > this.maxPacingWaitMs) {
+      return { ready: false, waitMs: worst - this.maxPacingWaitMs, reason: "pacing" };
+    }
+    return { ready: true, waitMs: 0, reason: "" };
   }
 
   async handle(c: Claim): Promise<HandleOutcome> {

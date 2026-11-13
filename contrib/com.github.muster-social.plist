@@ -3,7 +3,7 @@
 <!--
   launchd user agent. Install:
     cp contrib/com.github.muster-social.plist ~/Library/LaunchAgents/
-    # edit ProgramArguments to the absolute path of muster-social
+    # edit ProgramArguments to the absolute path of muster-social, and YOU in the log paths below
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.muster-social.plist
   Stop:  launchctl bootout gui/$(id -u)/com.github.muster-social
   Logs:  ~/Library/Logs/muster-social.log
@@ -30,9 +30,10 @@
   <integer>300</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
+  <!-- launchd does not expand ~: replace YOU with your macOS user name -->
   <key>StandardOutPath</key>
-  <string>/tmp/muster-social.log</string>
+  <string>/Users/YOU/Library/Logs/muster-social.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/muster-social.log</string>
+  <string>/Users/YOU/Library/Logs/muster-social.log</string>
 </dict>
 </plist>

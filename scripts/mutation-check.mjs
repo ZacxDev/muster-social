@@ -63,6 +63,8 @@ const MUTANTS = [
   ["M36-checker-uploaded-sha", "src/checker.ts", "if (m.sha256 !== l.sha256) {", "if (false) {", "test/checker.test.ts", "bytes muster already holds"],
   ["M37-checker-session-account", "src/checker.ts", "if ((s.account ?? \"\").toLowerCase() !== site.account.toLowerCase()) {", "if (false) {", "test/checker.test.ts", "signed in as another account"],
   ["M38-text-link-prefix", "src/text.ts", "return shown.length >= 4 && want.startsWith(shown);", "return true;", "test/text.test.ts", "linkStandsFor"],
+  ["M40-claim-hold-on-unresolved", "src/poster.ts", "if (paused.length) {", "if (false) {", "test/poster.test.ts", "readyToClaim: nothing is claimed while a site has an unresolved attempt"],
+  ["M41-claim-hold-on-pacing", "src/poster.ts", "if (worst > this.maxPacingWaitMs) {", "if (false) {", "test/poster.test.ts", "pacing:"],
   ["M39-config-unknown-keys", "src/config.ts", "for (const k of Object.keys(obj)) if (!allowed.has(k)) throw", "for (const k of Object.keys(obj)) if (false) throw", "test/config.test.ts", "unknown keys are refused"],
 ];
 

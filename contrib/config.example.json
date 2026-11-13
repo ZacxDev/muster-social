@@ -5,7 +5,6 @@
   "check_session": true,
   "check_interval_seconds": 30,
   "browser": {
-    "mode": "persistent",
     "user_data_dir": "~/.local/share/muster-social/profile",
     "channel": "chrome",
     "headless": false

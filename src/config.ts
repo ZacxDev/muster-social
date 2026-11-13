@@ -19,15 +19,13 @@ export interface SiteConfig {
   max_length?: number;
 }
 
+/** The browser is always launched on a dedicated profile directory; the
+ * plugin never attaches to the owner's everyday browser. */
 export interface BrowserConfig {
-  /** persistent: launch a browser on a dedicated profile directory.
-   *  cdp: attach to a browser you started with --remote-debugging-port. */
-  mode: "persistent" | "cdp";
   user_data_dir: string;
-  /** Installed browser to launch (persistent mode): chrome, chrome-beta, msedge… */
+  /** Installed browser to launch: chrome, chrome-beta, msedge… */
   channel?: string;
   executable_path?: string;
-  cdp_endpoint?: string;
   headless: boolean;
 }
 
@@ -67,14 +65,14 @@ function defaults(): Omit<Config, "server_url"> {
     claim_wait_seconds: 25,
     check_session: true,
     check_interval_seconds: 30,
-    browser: { mode: "persistent", user_data_dir: join(data, "muster-social", "profile"), headless: false },
+    browser: { user_data_dir: join(data, "muster-social", "profile"), headless: false },
     sites: {},
   };
 }
 
 const TOP = new Set(["server_url", "allow_insecure_http", "token_file", "state_dir", "media_root", "claim_wait_seconds",
   "check_session", "check_interval_seconds", "browser", "sites"]);
-const BROWSER = new Set(["mode", "user_data_dir", "channel", "executable_path", "cdp_endpoint", "headless"]);
+const BROWSER = new Set(["user_data_dir", "channel", "executable_path", "headless"]);
 const SITE = new Set(["enabled", "account", "min_gap_seconds", "allow_mentions", "max_length"]);
 const SITE_DEFAULT_GAP: Record<Venue, number> = { x: 900, linkedin: 1800 };
 
@@ -111,23 +109,12 @@ export function parseConfig(raw: unknown): Config {
   const b = raw["browser"] === undefined ? {} : raw["browser"];
   if (!isObj(b)) throw new Error("config: browser is an object");
   unknownKeys(b, BROWSER, "browser.");
-  const mode = b["mode"] ?? "persistent";
-  if (mode !== "persistent" && mode !== "cdp") throw new Error("config: browser.mode is persistent or cdp");
-  if (mode === "cdp" && typeof b["cdp_endpoint"] !== "string") throw new Error("config: browser.cdp_endpoint is required in cdp mode");
-  if (typeof b["cdp_endpoint"] === "string") {
-    const u = new URL(b["cdp_endpoint"]);
-    if (!["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) {
-      throw new Error("config: browser.cdp_endpoint must be a loopback address (a DevTools port is full control of the browser)");
-    }
-  }
   const browser: BrowserConfig = {
-    mode,
     user_data_dir: str(b["user_data_dir"], d.browser.user_data_dir, "browser.user_data_dir"),
     headless: bool(b["headless"], false, "browser.headless"),
   };
   if (b["channel"] !== undefined) browser.channel = String(b["channel"]);
   if (b["executable_path"] !== undefined) browser.executable_path = str(b["executable_path"], "", "browser.executable_path");
-  if (b["cdp_endpoint"] !== undefined) browser.cdp_endpoint = String(b["cdp_endpoint"]);
 
   const sitesRaw = raw["sites"] === undefined ? {} : raw["sites"];
   if (!isObj(sitesRaw)) throw new Error("config: sites is an object");

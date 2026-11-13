@@ -89,8 +89,12 @@ plugin --POST /drafts/{id}/result--> muster  (posted: ok + URL; unknown: nothing
 - **An unknown outcome pauses that site.** It is **not reported to muster**:
   reporting `ok: false` would ask the officer to draft again, and the first
   post may be live. muster marks the claim unconfirmed after its 2-minute
-  lease and never offers it again. Until you resolve it, every draft claimed
-  for that site is refused without a click.
+  lease and never offers it again. Until you resolve it, the plugin claims
+  **nothing**, on any site: muster's claim is not scoped to a site, and a
+  claimed draft it could not post would be refused and sent back for a
+  redraft. Pre-approval checks keep running, and the log says why it is
+  holding. (A draft already claimed for a paused site is still refused without
+  a click.)
 - **Read-back tolerates link rewriting.** X shows a URL through `t.co`, often
   truncated, and LinkedIn through `lnkd.in`. The read-back accepts a link that
   stands for each approved URL, and everything else must match exactly. It
@@ -160,8 +164,9 @@ systemctl --user enable --now muster-social
 journalctl --user -u muster-social -f
 ```
 
-**macOS (launchd):** edit the binary path in
-`contrib/com.github.muster-social.plist`, then
+**macOS (launchd):** in `contrib/com.github.muster-social.plist`, set the
+binary path and replace `YOU` in the log paths (launchd does not expand `~`).
+Logs go to `~/Library/Logs/muster-social.log`. Then
 
 ```sh
 cp contrib/com.github.muster-social.plist ~/Library/LaunchAgents/
@@ -172,21 +177,14 @@ The service stops only between steps, never mid-post. Exit code 3 means muster
 refused the token (revoked, or missing a capability), and the units do not
 restart on it.
 
-## Browser modes
+## The browser
 
-- **`persistent`** (default, recommended): the plugin launches your installed
-  browser (`browser.channel`: `chrome`, `msedge`, …, or
-  `browser.executable_path`) on a **dedicated profile directory**
-  (`browser.user_data_dir`) that you signed into once with
-  `muster-social login`. Your everyday browser is untouched. Chrome cannot open
-  one profile directory twice, so do not point this at your everyday profile
-  while that browser is running.
-- **`cdp`**: the plugin attaches to a browser you started yourself with
-  `--remote-debugging-port=9222` (`browser.cdp_endpoint`, loopback only). It
-  opens its own tab, asks the page to behave as focused, without raising the
-  window, so a background tab is not throttled, and closes that tab afterwards.
-  A DevTools port gives full control of that browser to anything on your
-  machine that can reach it. Prefer `persistent`.
+The plugin launches your installed browser (`browser.channel`: `chrome`,
+`msedge`, …, or `browser.executable_path`) on a **dedicated profile
+directory** (`browser.user_data_dir`) that you sign into once with
+`muster-social login`. It never attaches to your everyday browser, and your
+everyday browser is untouched. Chrome cannot open one profile directory twice,
+so do not point `user_data_dir` at your everyday profile.
 
 ## Drafts
 
@@ -244,7 +242,8 @@ Unknown keys are an error, so a typo cannot silently turn a guard off.
 | `claim_wait_seconds` | 25 | long-poll length (0–25) |
 | `check_session` | true | confirm the signed-in account before saying a draft is sendable |
 | `check_interval_seconds` | 30 | between pre-approval check sweeps |
-| `browser.*` | persistent | see Browser modes |
+| `browser.user_data_dir` | `~/.local/share/muster-social/profile` | the plugin's own browser profile |
+| `browser.channel`, `browser.executable_path`, `browser.headless` | (none), (none), false | which installed browser to launch |
 | `sites.<x\|linkedin>.account` | required | X handle, or LinkedIn profile slug (the part after `/in/`) |
 | `sites.*.min_gap_seconds` | 900 / 1800 | minimum time between two posts on the site |
 | `sites.*.allow_mentions` | false | |
@@ -265,8 +264,7 @@ particular:
 - That LinkedIn activity and comment ids carry a millisecond timestamp in
   their top bits, as X status ids do. The read-back relies on it to ignore
   older posts.
-- The CDP focus emulation used in `cdp` mode, and Playwright's file-chooser
-  handling on LinkedIn.
+- Playwright's file-chooser handling on LinkedIn's "Add media".
 
 All of these fail **closed**. A selector that matches nothing refuses before
 the click. A read-back that finds nothing after the click is `unknown`, which

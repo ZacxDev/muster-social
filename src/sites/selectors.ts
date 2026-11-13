@@ -2,9 +2,10 @@
 // markup change is a one-file fix.
 //
 // UNVERIFIED LIVE: none of these has been exercised against the live sites by
-// this project. The X entries follow publicly documented markup (stable
-// `data-testid` attributes); the LinkedIn entries follow its publicly visible
-// class names, which change more often. Every check that uses them fails
+// this project. They are attributes and class names observed on the sites'
+// pages (X's `data-testid` attributes, LinkedIn's class names), not a
+// documented interface: either site can change them at any time, LinkedIn's
+// more often. Every check that uses them fails
 // CLOSED: a selector that matches nothing makes the adapter refuse before the
 // click, never post blind. See the README's "Unverified live" section.
 

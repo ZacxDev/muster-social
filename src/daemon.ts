@@ -28,6 +28,7 @@ export async function runLoop(d: DaemonDeps): Promise<void> {
   await d.poster.reconcile();
   let lastCheck = Number.NEGATIVE_INFINITY;
   let backoff = 1000;
+  let lastHold = "";
   while (!d.stopping()) {
     try {
       if (d.now() - lastCheck >= d.checkIntervalMs) {
@@ -36,9 +37,12 @@ export async function runLoop(d: DaemonDeps): Promise<void> {
       }
       const gate = d.poster.readyToClaim();
       if (!gate.ready) {
+        if (gate.reason !== lastHold) d.log(`not claiming: ${gate.reason}`);
+        lastHold = gate.reason;
         await d.sleep(Math.min(gate.waitMs, d.checkIntervalMs));
         continue;
       }
+      lastHold = "";
       const claim = await d.claim(d.claimWaitSeconds);
       if (claim) await d.poster.handle(claim);
       await d.poster.reconcile();

@@ -1,12 +1,10 @@
 // The real browser driver: Playwright (playwright-core, which downloads no
-// browser) on the owner's installed Chrome/Edge/Chromium, either
-//   persistent: launched on a dedicated profile directory the owner signed into
-//               once (recommended), or
-//   cdp:        attached to a browser the owner started with
-//               --remote-debugging-port on a loopback address.
+// browser) on the owner's installed Chrome/Edge/Chromium, launched on a
+// dedicated profile directory the owner signed into once (`muster-social login`).
+// It never attaches to the owner's everyday browser.
 // UNVERIFIED LIVE: this module has not been run against the live sites.
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type Page } from "playwright-core";
 import type { BrowserConfig } from "../config.ts";
 import type { BrowserDriver } from "../sites/types.ts";
 import type { DriverSession } from "../poster.ts";
@@ -55,28 +53,6 @@ class PlaywrightDriver implements BrowserDriver {
 }
 
 export async function openPlaywright(cfg: BrowserConfig): Promise<DriverSession> {
-  if (cfg.mode === "cdp") {
-    const browser: Browser = await chromium.connectOverCDP(cfg.cdp_endpoint as string);
-    const context = browser.contexts()[0];
-    if (!context) {
-      await browser.close().catch(() => undefined);
-      throw new Error("the browser at cdp_endpoint has no default context");
-    }
-    const page = await context.newPage();
-    // A background tab is throttled and a click on it can be dropped; ask the
-    // page to behave as focused without raising its window.
-    const cdp = await context.newCDPSession(page);
-    await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
-    return {
-      driver: new PlaywrightDriver(page),
-      close: async () => {
-        await page.close().catch(() => undefined);
-        // Disconnect only: closing a connectOverCDP browser object detaches,
-        // it never quits the owner's browser.
-        await browser.close().catch(() => undefined);
-      },
-    };
-  }
   const opts: Parameters<typeof chromium.launchPersistentContext>[1] = { headless: cfg.headless, viewport: null };
   if (cfg.channel) opts.channel = cfg.channel;
   if (cfg.executable_path) opts.executablePath = cfg.executable_path;
@@ -90,7 +66,6 @@ export async function openPlaywright(cfg: BrowserConfig): Promise<DriverSession>
 
 /** Open the dedicated profile so the owner can sign in by hand (`muster-social login`). */
 export async function openForLogin(cfg: BrowserConfig, urls: string[]): Promise<BrowserContext> {
-  if (cfg.mode !== "persistent") throw new Error("login is for persistent mode; in cdp mode sign in in your own browser");
   const opts: Parameters<typeof chromium.launchPersistentContext>[1] = { headless: false, viewport: null };
   if (cfg.channel) opts.channel = cfg.channel;
   if (cfg.executable_path) opts.executablePath = cfg.executable_path;

@@ -179,6 +179,25 @@ test("the owner resolves an unknown attempt; the result is reported and the site
   assert.equal((await w.poster.handle(claim(12, "next"))).action, "posted");
 });
 
+test("readyToClaim: nothing is claimed while a site has an unresolved attempt, until the owner resolves it", async () => {
+  const w = world({ site: { onSubmit: "drop" } });
+  assert.deepEqual(w.poster.readyToClaim(), { ready: true, waitMs: 0, reason: "" });
+  await w.poster.handle(claim(40, "maybe posted"));
+  const held = w.poster.readyToClaim();
+  assert.equal(held.ready, false);
+  assert.match(held.reason, /unresolved attempt on x \(draft 40\)/u);
+  await w.poster.resolve(40, "not_posted");
+  assert.equal(w.poster.readyToClaim().ready, true);
+});
+
+test("readyToClaim: a hard crash's open record (no outcome) also holds claims after restart", async () => {
+  const p = join(dir.dir, "state", "journal.jsonl");
+  const j = new Journal(p);
+  j.append({ t: "open", draft_id: 41, venue: "x", at: 1 });
+  const w = world({ journal: new Journal(p) });
+  assert.equal(w.poster.readyToClaim().ready, false);
+});
+
 test("resolve --not-posted reports ok:false; resolve refuses a draft with nothing unresolved", async () => {
   const w = world({ site: { onSubmit: "drop" } });
   await w.poster.handle(claim(13, "maybe"));

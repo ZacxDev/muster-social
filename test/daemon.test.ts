@@ -13,7 +13,7 @@ function fakes(o: { claims: (Claim | null | Error)[]; ready?: boolean }) {
     reconcile: async () => {
       reconciles++;
     },
-    readyToClaim: () => ({ ready: o.ready ?? true, waitMs: 1000 }),
+    readyToClaim: () => ({ ready: o.ready ?? true, waitMs: 1000, reason: o.ready === false ? "unresolved attempt on x (draft 1)" : "" }),
     handle: async (c: Claim) => {
       handled.push(c.draft_id);
       return { action: "posted", ref: "" };
@@ -64,4 +64,5 @@ test("while pacing says not ready, nothing is claimed", async () => {
   const f = fakes({ claims: [], ready: false });
   await runLoop({ ...f.deps, claim: async () => { claimed++; return null; }, stopping: () => ++loops > 3 });
   assert.equal(claimed, 0);
+  assert.equal(f.logs.filter((l) => l.startsWith("not claiming: unresolved attempt")).length, 1, "the reason is logged once, not every loop");
 });
