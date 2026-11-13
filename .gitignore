@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+# local state never belongs in the repo
+token
+journal.jsonl
+config.json
