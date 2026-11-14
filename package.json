@@ -1,0 +1,32 @@
+{
+  "name": "muster-social",
+  "version": "0.1.0",
+  "description": "muster plugin: post owner-approved outbound drafts to social sites from the owner's own signed-in browser",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "muster-social": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "start": "node src/cli.ts run"
+  },
+  "dependencies": {
+    "linkedom": "^0.18.12",
+    "playwright-core": "^1.56.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.3"
+  }
+}

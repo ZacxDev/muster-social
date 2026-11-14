@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent. Install:
+    cp contrib/com.github.muster-social.plist ~/Library/LaunchAgents/
+    # replace YOU in the log paths below (the binary is assumed at ~/.local/bin, as the README installs it)
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.muster-social.plist
+  Stop:  launchctl bootout gui/$(id -u)/com.github.muster-social
+  Logs:  ~/Library/Logs/muster-social.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.muster-social</string>
+  <!-- Exit 3 = muster refused the token (revoked, or a missing capability):
+       restarting cannot fix it. The shell turns 3 into 0, and KeepAlive
+       restarts only an UNSUCCESSFUL exit, so launchd leaves it stopped. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>"$HOME/.local/bin/muster-social" run; rc=$?; if [ "$rc" -eq 3 ]; then echo "muster refused the token (exit 3); not restarting" >&amp;2; exit 0; fi; exit "$rc"</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>300</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <!-- launchd does not expand ~: replace YOU with your macOS user name -->
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/muster-social.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/muster-social.log</string>
+</dict>
+</plist>
