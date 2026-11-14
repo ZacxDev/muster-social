@@ -24,26 +24,11 @@ Sites in v0:
 
 New sites plug in through one adapter interface (`src/sites/types.ts`).
 
-## Read this first: the sites' terms
+## Pacing
 
-Both sites' terms, as we read them in November 2026, **forbid** this kind of
-automation of a personal account. This is not legal advice; read the documents
-yourself.
-
-- **X.** The Terms of Service bar reaching the service by automated means
-  other than X's published interfaces (its API), and the automation rules
-  expect automated posting to go through the API. Driving the web app with a
-  browser automation tool is outside both. X can lock, limit or suspend an
-  account it believes is automated this way.
-- **LinkedIn.** The User Agreement's "Dos and Don'ts" name the use of bots or
-  other unauthorized automated methods to create, comment on, like or share
-  posts. LinkedIn restricts accounts it detects doing it, sometimes
-  permanently.
-
-What this plugin does to lower, **not remove**, that risk: it posts only what
-you approved, one post at a time, with a minimum gap per site (15 minutes on X
-and 30 on LinkedIn by default), and it never browses, follows, likes, scrapes
-or messages. If losing the account would hurt, do not use this on it.
+It posts only what you approved, one post at a time, with a minimum gap per
+site (15 minutes on X and 30 on LinkedIn by default), and it never browses,
+follows, likes, scrapes or messages.
 
 ## How a post goes out
 
